@@ -4,6 +4,10 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Extracts every entry of zipPath under destination. Directory traversal
 // ("..", absolute paths) is rejected. progress receives 0..1 on the calling
 // thread; return NO from cancel to keep going. Returns NO with *error set.
@@ -31,6 +35,10 @@ BOOL Theft4FlattenGameFolder(NSString *destination);
 BOOL Theft4MoveFolderContents(NSString *source, NSString *destination,
                               void (^_Nullable progress)(double fraction),
                               NSString *_Nullable *_Nullable error);
+
+#ifdef __cplusplus
+}
+#endif
 
 // Download-manager style: up to 16 parallel connections with byte ranges,
 // per-part resume and retry, share-link fixing, speed reporting.
