@@ -546,6 +546,10 @@ if(THEFT4_BC_TEXTURE_COMPATIBILITY)
         "${CMAKE_SOURCE_DIR}/thirdparty/astc-encoder/LICENSE.txt"
         PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
 endif()
+# Theft4-MetalFX: game ZIP download and extraction (zlib from the iOS SDK).
+enable_language(OBJCXX)
+target_sources(Theft4 PRIVATE Theft4/Theft4ZipExtract.mm)
+set_source_files_properties(Theft4/Theft4ZipExtract.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 set_source_files_properties(Theft4/XeniOS-Touch-LICENSE.txt PROPERTIES
     MACOSX_PACKAGE_LOCATION Resources)
 set_source_files_properties("${THEFT4_ASSET_CATALOG}" PROPERTIES
@@ -554,7 +558,7 @@ target_link_libraries(Theft4 PRIVATE theft4_core_bridge
     "-framework UIKit" "-framework Metal" "-framework MetalFX" "-framework QuartzCore" "-framework SceneKit" "-framework CoreGraphics"
     "-framework GameController" "-framework CoreHaptics"
     "-framework AVFoundation" "-framework AudioToolbox"
-    "-framework UniformTypeIdentifiers")
+    "-framework UniformTypeIdentifiers" z)
 target_link_options(Theft4 PRIVATE "LINKER:-dead_strip")
 target_compile_options(Theft4 PRIVATE -fobjc-arc)
 if(THEFT4_DIRECT_METAL_DEFAULT)

@@ -1,23 +1,24 @@
 #pragma once
 // MetalFX upscaler presets (Theft4-MetalFX fork).
 // 0 = Off: the launcher's own resolution policy is used unchanged.
-// 1..5 = MetalFX Spatial with a fixed render-to-output ratio:
-//   1 Ultra Quality 1.3x, 2 Quality 1.5x, 3 Balanced 1.7x,
-//   4 Performance 2.0x, 5 Ultra Performance 3.0x.
+// 1..4 = MetalFX Spatial with a fixed render-to-output ratio:
+//   1 Native 1.0x (full output resolution, no upscale),
+//   2 Quality 1.5x, 3 Performance 2.0x, 4 Ultra Performance 3.0x.
+// Stored under a new key so values saved by the earlier six-choice build
+// are not misread.
 #include <stdint.h>
 #include "theft4_output_policy.h"
 
-#define THEFT4_METALFX_PRESET_KEY "Theft4MetalFXPreset"
-#define THEFT4_METALFX_PRESET_DEFAULT 4
-#define THEFT4_METALFX_PRESET_COUNT 6
+#define THEFT4_METALFX_PRESET_KEY "Theft4MetalFXMode"
+#define THEFT4_METALFX_PRESET_DEFAULT 0
+#define THEFT4_METALFX_PRESET_COUNT 5
 
 static inline double theft4_metalfx_ratio(int preset) {
     switch (preset) {
-        case 1: return 1.3;
+        case 1: return 1.0;
         case 2: return 1.5;
-        case 3: return 1.7;
-        case 4: return 2.0;
-        case 5: return 3.0;
+        case 3: return 2.0;
+        case 4: return 3.0;
         default: return 1.0;
     }
 }

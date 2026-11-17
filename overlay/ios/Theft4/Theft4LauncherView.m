@@ -4,6 +4,7 @@
 #endif
 #import "Theft4CityView.h"
 #include "theft4_output_policy.h"
+#include "theft4_upscale_preset.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -102,6 +103,7 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
     UIScrollView *_scroll, *_navigationScroll;
     UIStackView *_content, *_navigation;
     UIStackView *_play, *_graphics, *_interfacePage, *_system, *_mods;
+    UIView *_metalfxModeRow;
     UILabel *_playHeadline, *_playIntro, *_playSaveNote;
     NSArray<UIButton *> *_tabs;
     NSArray<UIView *> *_pages;
@@ -286,43 +288,41 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
                     ? @"This device uses a fixed 1080p output budget. Lower internal resolutions use FSR 1; changes apply on the next game launch."
                     : @"Independent of internal resolution. Off bypasses FSR 1 while keeping the selected scene resolution.")
                 toggle:_fsrUpscaling],
+        ]];
+        // Theft4-MetalFX: Apple MetalFX upscaler, its own switch under FSR.
+        // On turns FSR off; the mode row only shows while it is on.
+        _metalfxUpscaling = [UISwitch new];
+        _metalfxUpscaling.onTintColor = Ink(0x35CDD1);
+        _metalfxUpscaling.accessibilityIdentifier = @"settings.metalfxUpscaling";
+        _metalfxMode = ChoiceControl(@[@"Native", @"Quality", @"Perf.", @"Ultra Perf."], @"metalfxMode",
+            @"MetalFX mode", @"Applies at the next game launch.");
+        {
+            NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+            NSInteger mode = [defaults integerForKey:@"Theft4MetalFXMode"];
+            if (mode < 0 || mode > 4) mode = 0;
+            _metalfxUpscaling.on = mode > 0;
+            NSInteger lastMode = [defaults objectForKey:@"Theft4MetalFXLastMode"]
+                ? [defaults integerForKey:@"Theft4MetalFXLastMode"] : 3;
+            if (lastMode < 1 || lastMode > 4) lastMode = 3;
+            _metalfxMode.selectedSegmentIndex = (mode > 0 ? mode : lastMode) - 1;
+        }
+        [_metalfxUpscaling addTarget:self action:@selector(metalfxToggled:)
+            forControlEvents:UIControlEventValueChanged];
+        [_metalfxMode addTarget:self action:@selector(metalfxModeChanged:)
+            forControlEvents:UIControlEventValueChanged];
+        [_fsrUpscaling addTarget:self action:@selector(fsrToggledForMetalFX:)
+            forControlEvents:UIControlEventValueChanged];
+        _metalfxModeRow = [self choice:@"METALFX MODE"
+            detail:@"Native renders at full screen resolution with no upscale. Quality 1.5×, Performance 2×, Ultra Performance 3× lower internal resolution, upscaled by MetalFX. Overrides Internal Resolution. Applies at the next game launch."
+            control:_metalfxMode];
+        _metalfxModeRow.hidden = !_metalfxUpscaling.on;
+        [graphicsRows addObjectsFromArray:@[
+            [self setting:@"METALFX UPSCALING"
+                   detail:@"Apple MetalFX upscaler built for iPhone GPUs. Turning it on turns FSR off. Off leaves the settings above unchanged."
+                   toggle:_metalfxUpscaling],
+            _metalfxModeRow,
             _resolutionSummary
         ]];
-        // Theft4-MetalFX: Off keeps the settings above; other choices render
-        // below the output size and upscale with Apple MetalFX Spatial.
-        _metalfxPreset = ChoiceControl(@[@"Off", @"UQ", @"Qual", @"Bal", @"Perf", @"UP"], @"metalfxPreset",
-            @"MetalFX upscaler", @"Applies at the next game launch.");
-        {
-            NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-            NSInteger preset = [defaults objectForKey:@"Theft4MetalFXPreset"] ?
-                [defaults integerForKey:@"Theft4MetalFXPreset"] : 4;
-            _metalfxPreset.selectedSegmentIndex = MAX(0, MIN(5, preset));
-        }
-        [_metalfxPreset addTarget:self action:@selector(metalfxPresetChanged:)
-            forControlEvents:UIControlEventValueChanged];
-        [graphicsRows addObject:[self choice:@"METALFX UPSCALER"
-            detail:@"Apple MetalFX Spatial. Off uses the resolution settings above. UQ 1.3x, Quality 1.5x, Balanced 1.7x, Performance 2x, Ultra Performance 3x lower internal resolution, upscaled to your screen. Applies at the next game launch."
-            control:_metalfxPreset]];
-        // Theft4-MetalFX: city density (CPU). Values index Low/Med/High/Stock.
-        _trafficDensity = ChoiceControl(@[@"Low", @"Med", @"High", @"Stock"], @"trafficDensity",
-            @"Traffic density", @"Applies at the next game launch.");
-        _pedDensity = ChoiceControl(@[@"Low", @"Med", @"High", @"Stock"], @"pedDensity",
-            @"Pedestrian density", @"Applies at the next game launch.");
-        {
-            NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-            NSInteger t = [defaults objectForKey:@"Theft4TrafficDensity"] ? [defaults integerForKey:@"Theft4TrafficDensity"] : 1;
-            NSInteger p = [defaults objectForKey:@"Theft4PedDensity"] ? [defaults integerForKey:@"Theft4PedDensity"] : 1;
-            _trafficDensity.selectedSegmentIndex = MAX(0, MIN(3, t));
-            _pedDensity.selectedSegmentIndex = MAX(0, MIN(3, p));
-        }
-        [_trafficDensity addTarget:self action:@selector(trafficDensityChanged:) forControlEvents:UIControlEventValueChanged];
-        [_pedDensity addTarget:self action:@selector(pedDensityChanged:) forControlEvents:UIControlEventValueChanged];
-        [graphicsRows addObject:[self choice:@"TRAFFIC"
-            detail:@"Amount of cars driving and parked. Lower saves CPU. Low 35%, Med 60%, High 80% of stock. Applies at the next game launch."
-            control:_trafficDensity]];
-        [graphicsRows addObject:[self choice:@"PEDESTRIANS"
-            detail:@"Amount of people on the street. Lower saves CPU. Low 35%, Med 60%, High 80% of stock. Applies at the next game launch."
-            control:_pedDensity]];
         _frameSpeedButton = Action(@"FRAME SPEED", NO);
         _frameSpeedButton.accessibilityIdentifier = @"settings.frameSpeed";
         _restoreGraphicsButton = Action(@"RESTORE PREVIOUS SETTINGS", NO);
@@ -356,6 +356,26 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
             presetButtons,
             Copy(@"Auto Optimize selects a starting profile for this device. Original restores 720p, original shadow/distance/detail/reflections, and the title's blur. You can adjust each setting afterward.", 12, NO)
         ]];
+        // Theft4-MetalFX: city density (CPU). Values index Low/Med/High/Stock.
+        _trafficDensity = ChoiceControl(@[@"Low", @"Med", @"High", @"Stock"], @"trafficDensity",
+            @"Traffic density", @"Applies at the next game launch.");
+        _pedDensity = ChoiceControl(@[@"Low", @"Med", @"High", @"Stock"], @"pedDensity",
+            @"Pedestrian density", @"Applies at the next game launch.");
+        {
+            NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+            NSInteger t = [defaults objectForKey:@"Theft4TrafficDensity"] ? [defaults integerForKey:@"Theft4TrafficDensity"] : 1;
+            NSInteger p = [defaults objectForKey:@"Theft4PedDensity"] ? [defaults integerForKey:@"Theft4PedDensity"] : 1;
+            _trafficDensity.selectedSegmentIndex = MAX(0, MIN(3, t));
+            _pedDensity.selectedSegmentIndex = MAX(0, MIN(3, p));
+        }
+        [_trafficDensity addTarget:self action:@selector(trafficDensityChanged:) forControlEvents:UIControlEventValueChanged];
+        [_pedDensity addTarget:self action:@selector(pedDensityChanged:) forControlEvents:UIControlEventValueChanged];
+        [graphicsRows addObject:[self choice:@"TRAFFIC DENSITY"
+            detail:@"Amount of cars driving and parked. Lower saves CPU. Low 35%, Med 60%, High 80% of stock. Applies at the next game launch."
+            control:_trafficDensity]];
+        [graphicsRows addObject:[self choice:@"PEDESTRIAN DENSITY"
+            detail:@"Amount of people on the street. Lower saves CPU. Low 35%, Med 60%, High 80% of stock. Applies at the next game launch."
+            control:_pedDensity]];
     }
 
     _shadowQuality = ChoiceControl(@[@"Optimized", @"Original", @"Enhanced", @"Ultra"], @"shadowQuality",
@@ -898,6 +918,11 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
         const BOOL native = _renderResolution.selectedSegmentIndex == 4;
         _fsrUpscaling.enabled = !native;
         if (native) _fsrUpscaling.on = NO;
+        if (_metalfxUpscaling.on && _fsrUpscaling.on) {
+            // A preset may switch FSR on; MetalFX and FSR never run together.
+            _fsrUpscaling.on = NO;
+            [_fsrUpscaling sendActionsForControlEvents:UIControlEventValueChanged];
+        }
         UIScreen *screen = self.window.screen ?: UIScreen.mainScreen;
         const char *deviceProfile = getenv("THEFT4_DEVICE_PROFILE") ?: "";
         const BOOL fixed1080Output = strcmp(deviceProfile, "a19") == 0 ||
@@ -909,7 +934,7 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
         if (!units) units = 1;
         const uint32_t nativeWidth = _nativeAspect.on ? fullWidth : units * 16;
         const uint32_t nativeHeight = _nativeAspect.on ? fullHeight : units * 9;
-        const theft4_output_policy output = _nativeAspect.on
+        theft4_output_policy output = _nativeAspect.on
             ? theft4_output_policy_for_native_aspect_lab(self.renderHeight,
                 _fsrUpscaling.on, nativeWidth, nativeHeight, fixed1080Output)
             : fixed1080Output && !native
@@ -917,9 +942,13 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
                 self.renderHeight, _fsrUpscaling.on, nativeWidth, nativeHeight)
             : theft4_output_policy_for_lab(self.renderHeight, _fsrUpscaling.on,
                 nativeWidth, nativeHeight);
+        const int metalfxMode = _metalfxUpscaling.on ? (int)MAX(0, MIN(3, _metalfxMode.selectedSegmentIndex)) + 1 : 0;
+        if (metalfxMode > 0) output = theft4_apply_metalfx_preset(output, metalfxMode);
         _resolutionSummary.text = [NSString stringWithFormat:@"%u × %u  →  %u × %u\n%@ · NEXT GAME LAUNCH",
             output.render_width, output.render_height, output.output_width, output.output_height,
-            [NSString stringWithFormat:@"%@ · %@", output.fsr1 ? @"FSR ON" : @"FSR OFF",
+            [NSString stringWithFormat:@"%@ · %@",
+                metalfxMode > 0 ? [@"METALFX " stringByAppendingString:@[@"NATIVE", @"QUALITY", @"PERFORMANCE", @"ULTRA PERFORMANCE"][metalfxMode - 1]]
+                    : (output.fsr1 ? @"FSR ON" : @"FSR OFF"),
                 output.native_aspect ? @"NATIVE ASPECT" : @"16:9"]];
         _configuration.text = [NSString stringWithFormat:@"%@ / %@ / %@",
             native ? @"NATIVE PIXELS" : [NSString stringWithFormat:@"%up", self.renderHeight],
@@ -959,8 +988,32 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
 - (void)pedDensityChanged:(UISegmentedControl *)sender {
     [NSUserDefaults.standardUserDefaults setInteger:sender.selectedSegmentIndex forKey:@"Theft4PedDensity"];
 }
-- (void)metalfxPresetChanged:(UISegmentedControl *)sender {
-    [NSUserDefaults.standardUserDefaults setInteger:sender.selectedSegmentIndex forKey:@"Theft4MetalFXPreset"];
+- (void)saveMetalFXMode {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    const NSInteger mode = MAX(0, MIN(3, _metalfxMode.selectedSegmentIndex)) + 1;
+    [defaults setInteger:mode forKey:@"Theft4MetalFXLastMode"];
+    [defaults setInteger:_metalfxUpscaling.on ? mode : 0 forKey:@"Theft4MetalFXMode"];
+}
+- (void)metalfxToggled:(UISwitch *)sender {
+    if (sender.on && _fsrUpscaling.on) {
+        _fsrUpscaling.on = NO;
+        // Let the app persist FSR exactly as if the user had switched it.
+        [_fsrUpscaling sendActionsForControlEvents:UIControlEventValueChanged];
+    }
+    [self saveMetalFXMode];
+    [UIView animateWithDuration:0.2 animations:^{ self->_metalfxModeRow.hidden = !sender.on; }];
+    [self refreshConfigurationSummary];
+}
+- (void)metalfxModeChanged:(UISegmentedControl *)sender {
+    [self saveMetalFXMode];
+    [self refreshConfigurationSummary];
+}
+- (void)fsrToggledForMetalFX:(UISwitch *)sender {
+    if (sender.on && _metalfxUpscaling.on) {
+        _metalfxUpscaling.on = NO;
+        [self saveMetalFXMode];
+        [UIView animateWithDuration:0.2 animations:^{ self->_metalfxModeRow.hidden = YES; }];
+    }
 }
 
 @end
