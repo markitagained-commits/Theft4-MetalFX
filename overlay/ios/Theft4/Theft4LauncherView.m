@@ -303,6 +303,26 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
         [graphicsRows addObject:[self choice:@"METALFX UPSCALER"
             detail:@"Apple MetalFX Spatial. Off uses the resolution settings above. UQ 1.3x, Quality 1.5x, Balanced 1.7x, Performance 2x, Ultra Performance 3x lower internal resolution, upscaled to your screen. Applies at the next game launch."
             control:_metalfxPreset]];
+        // Theft4-MetalFX: city density (CPU). Values index Low/Med/High/Stock.
+        _trafficDensity = ChoiceControl(@[@"Low", @"Med", @"High", @"Stock"], @"trafficDensity",
+            @"Traffic density", @"Applies at the next game launch.");
+        _pedDensity = ChoiceControl(@[@"Low", @"Med", @"High", @"Stock"], @"pedDensity",
+            @"Pedestrian density", @"Applies at the next game launch.");
+        {
+            NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+            NSInteger t = [defaults objectForKey:@"Theft4TrafficDensity"] ? [defaults integerForKey:@"Theft4TrafficDensity"] : 1;
+            NSInteger p = [defaults objectForKey:@"Theft4PedDensity"] ? [defaults integerForKey:@"Theft4PedDensity"] : 1;
+            _trafficDensity.selectedSegmentIndex = MAX(0, MIN(3, t));
+            _pedDensity.selectedSegmentIndex = MAX(0, MIN(3, p));
+        }
+        [_trafficDensity addTarget:self action:@selector(trafficDensityChanged:) forControlEvents:UIControlEventValueChanged];
+        [_pedDensity addTarget:self action:@selector(pedDensityChanged:) forControlEvents:UIControlEventValueChanged];
+        [graphicsRows addObject:[self choice:@"TRAFFIC"
+            detail:@"Amount of cars driving and parked. Lower saves CPU. Low 35%, Med 60%, High 80% of stock. Applies at the next game launch."
+            control:_trafficDensity]];
+        [graphicsRows addObject:[self choice:@"PEDESTRIANS"
+            detail:@"Amount of people on the street. Lower saves CPU. Low 35%, Med 60%, High 80% of stock. Applies at the next game launch."
+            control:_pedDensity]];
         _frameSpeedButton = Action(@"FRAME SPEED", NO);
         _frameSpeedButton.accessibilityIdentifier = @"settings.frameSpeed";
         _restoreGraphicsButton = Action(@"RESTORE PREVIOUS SETTINGS", NO);
@@ -932,6 +952,12 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
 - (void)dealloc {
     [NSNotificationCenter.defaultCenter removeObserver:self];
     [self retireScene];
+}
+- (void)trafficDensityChanged:(UISegmentedControl *)sender {
+    [NSUserDefaults.standardUserDefaults setInteger:sender.selectedSegmentIndex forKey:@"Theft4TrafficDensity"];
+}
+- (void)pedDensityChanged:(UISegmentedControl *)sender {
+    [NSUserDefaults.standardUserDefaults setInteger:sender.selectedSegmentIndex forKey:@"Theft4PedDensity"];
 }
 - (void)metalfxPresetChanged:(UISegmentedControl *)sender {
     [NSUserDefaults.standardUserDefaults setInteger:sender.selectedSegmentIndex forKey:@"Theft4MetalFXPreset"];
