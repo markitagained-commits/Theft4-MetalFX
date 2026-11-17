@@ -12,6 +12,14 @@ BOOL Theft4ExtractZip(NSString *zipPath, NSString *destination,
                       BOOL (^_Nullable cancelled)(void),
                       NSString *_Nullable *_Nullable error);
 
+// 1 = ZIP, 2 = Xbox 360 disc image (XGD1/2/3 or trimmed XISO), 0 = neither.
+NSInteger Theft4DetectGameArchive(NSString *path);
+
+// Extracts an Xbox 360 game ISO (XDVDFS/GDF) into destination.
+BOOL Theft4ExtractXboxISO(NSString *isoPath, NSString *destination,
+                          void (^_Nullable progress)(double fraction),
+                          NSString *_Nullable *_Nullable error);
+
 // If destination has no default.xex but exactly one nested folder holds it,
 // moves that folder's contents up into destination. Returns YES when
 // destination/default.xex exists afterwards.

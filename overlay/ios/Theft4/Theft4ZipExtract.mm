@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <math.h>
+#include "theft4_xiso.h"
 
 #include <zlib.h>
 #include <stdio.h>
@@ -266,6 +267,26 @@ BOOL Theft4FlattenGameFolder(NSString *destination) {
     return [fm fileExistsAtPath:xex];
 }
 
+NSInteger Theft4DetectGameArchive(NSString *path) {
+    FILE *f = fopen(path.fileSystemRepresentation, "rb");
+    if (!f) return 0;
+    unsigned char magic[2] = {0, 0};
+    NSInteger kind = 0;
+    if (fread(magic, 1, 2, f) == 2 && magic[0] == 'P' && magic[1] == 'K') kind = 1;
+    else if (theft4xiso::detect(f, nullptr, nullptr, nullptr)) kind = 2;
+    fclose(f);
+    return kind;
+}
+
+BOOL Theft4ExtractXboxISO(NSString *isoPath, NSString *destination,
+                          void (^progress)(double), NSString **error) {
+    std::string err;
+    bool ok = theft4xiso::extract(isoPath.fileSystemRepresentation, destination.fileSystemRepresentation,
+        [progress](double p) { if (progress) progress(p); }, nullptr, err);
+    if (!ok && error) *error = [NSString stringWithUTF8String:err.c_str()] ?: @"ISO extraction failed.";
+    return ok;
+}
+
 BOOL Theft4MoveFolderContents(NSString *source, NSString *destination,
                               void (^progress)(double), NSString **error) {
     NSFileManager *fm = NSFileManager.defaultManager;
@@ -330,7 +351,7 @@ BOOL Theft4MoveFolderContents(NSString *source, NSString *destination,
 //    it takes half of the biggest part still running, so the tail stays fast.
 // 4. A part that drops resumes from its last byte, up to 10 tries with backoff
 //    (1, 2, 4 … 30 s). Servers without ranges get one stream with retries.
-// 5. Speed is a 2-second moving rate. The file must start with "PK".
+// 5. Speed is a 2-second moving rate. The file must be a ZIP or an Xbox 360 ISO.
 // ---------------------------------------------------------------------------
 
 static const int kMaxParts = 16;      // FDM max per download
@@ -475,7 +496,7 @@ static NSURL *Theft4DirectLink(NSURL *url) {
         return;
     }
     if ([type containsString:@"text/html"]) {
-        _probeError = @"That link gave a web page, not a ZIP file. Use a direct download link that starts the file right away.";
+        _probeError = @"That link gave a web page, not a ZIP or ISO. Use a direct download link that starts the file right away.";
         return;
     }
     if (http.URL) _url = http.URL;            // keep the final URL after redirects
@@ -662,10 +683,9 @@ didCompleteWithError:(NSError *)error {
     for (Theft4DownloadPart *p in _parts) if (!p.done) return;
     // Every byte is in.
     fsync(_fd);
-    unsigned char magic[2] = {0, 0};
-    pread(_fd, magic, 2, 0);
-    if (!(magic[0] == 'P' && magic[1] == 'K')) {
-        [self finish:@"That link gave a web page, not a ZIP file. Use a direct download link that starts the file right away."];
+    close(_fd); _fd = -1;
+    if (Theft4DetectGameArchive(_destination) == 0) {
+        [self finish:@"That link didn't give a ZIP or an Xbox 360 ISO (probably a web page). Use a direct download link that starts the file right away."];
         return;
     }
     [self reportProgress:YES];

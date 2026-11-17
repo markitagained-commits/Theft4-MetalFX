@@ -1391,9 +1391,9 @@ static void bootEvent(void *context, const char *event) {
         NSString *title = _baseGameCheckAttempted ? @"GAME FILES NOT FOUND"
                                                    : @"QUIT APP & LOAD GAME FILES";
         NSString *detail = _baseGameCheckAttempted
-            ? [NSString stringWithFormat:@"No default.xex was found in:\n\n%@\n\nCopy the extracted game contents there, or tap LOAD GAME FILES to download a ZIP, pick a ZIP, or pick your game folder.",
+            ? [NSString stringWithFormat:@"No default.xex was found in:\n\n%@\n\nCopy the extracted game contents there, or tap LOAD GAME FILES to download or pick a ZIP or ISO, or pick your game folder.",
                 Theft4FilesGamePath()]
-            : [NSString stringWithFormat:@"In Files, copy the contents of your legally obtained, extracted Xbox 360 GTA IV game into:\n\n%@\n\nThe folder must contain default.xex directly. Do not copy a raw ISO. When the transfer finishes, reopen %@.\n\nOr tap LOAD GAME FILES to download a ZIP from a link, pick a ZIP from Files (extracted automatically), or pick your game folder from Files (moved in automatically).",
+            : [NSString stringWithFormat:@"In Files, copy the contents of your legally obtained, extracted Xbox 360 GTA IV game into:\n\n%@\n\nThe folder must contain default.xex directly. To use an ISO, tap LOAD GAME FILES instead. When the transfer finishes, reopen %@.\n\nOr tap LOAD GAME FILES to download a ZIP or Xbox 360 ISO from a link, pick one from Files (extracted automatically), or pick your game folder (moved in automatically).",
                 Theft4FilesGamePath(), Theft4DisplayName()];
         [self showInstallationTitle:title detail:detail
                         actionTitle:@"LOAD GAME FILES" spinner:NO
@@ -1735,11 +1735,11 @@ static void bootEvent(void *context, const char *event) {
         fileExistsAtPath:[[_gameURL URLByAppendingPathComponent:@"default.xex"] path]];
     if (hasBase) { [self checkBaseGame]; return; }
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"LOAD GAME FILES"
-        message:@"Use your own extracted Xbox 360 GTA IV game. Download a ZIP from a link, pick a ZIP from Files, or pick your extracted game folder from Files. ZIPs are extracted into the game folder and then deleted (you need space for both at once). A picked folder is moved in."
+        message:@"Use your own extracted Xbox 360 GTA IV game. Download a ZIP or Xbox 360 ISO from a link, pick one from Files, or pick your extracted game folder. ZIPs and ISOs are always extracted into the game folder and then deleted (you need space for both at once). A picked folder is moved in."
         preferredStyle:UIAlertControllerStyleAlert];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"DOWNLOAD ZIP FROM LINK"
+    [sheet addAction:[UIAlertAction actionWithTitle:@"DOWNLOAD ZIP OR ISO FROM LINK"
         style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { [self promptGameDownloadLink]; }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"SELECT ZIP FROM FILES"
+    [sheet addAction:[UIAlertAction actionWithTitle:@"SELECT ZIP OR ISO FROM FILES"
         style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { [self chooseGameZip]; }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"SELECT GAME FOLDER FROM FILES"
         style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { [self chooseGameFolder]; }]];
@@ -1752,7 +1752,7 @@ static void bootEvent(void *context, const char *event) {
 
 - (void)promptGameDownloadLink {
     UIAlertController *prompt = [UIAlertController alertControllerWithTitle:@"DIRECT DOWNLOAD LINK"
-        message:@"Paste a direct link to a ZIP of your game files (http or https). Keep Theft4 open while it downloads."
+        message:@"Paste a direct link to a ZIP or Xbox 360 ISO of your game (http or https). Dropbox and Google Drive share links work. Keep Theft4 open while it downloads."
         preferredStyle:UIAlertControllerStyleAlert];
     [prompt addTextFieldWithConfigurationHandler:^(UITextField *field) {
         field.placeholder = @"https://…/gta4.zip";
@@ -1828,7 +1828,7 @@ static void bootEvent(void *context, const char *event) {
 - (void)chooseGameZip {
     if (_gameTransferBusy) return;
     _gameZipPicker = [[UIDocumentPickerViewController alloc]
-        initForOpeningContentTypes:@[UTTypeZIP] asCopy:NO];
+        initForOpeningContentTypes:@[UTTypeZIP, UTTypeDiskImage, [UTType typeWithFilenameExtension:@"iso"] ?: UTTypeData] asCopy:NO];
     _gameZipPicker.delegate = self;
     _gameZipPicker.allowsMultipleSelection = NO;
     [self presentViewController:_gameZipPicker animated:YES completion:nil];
@@ -1883,17 +1883,31 @@ static void bootEvent(void *context, const char *event) {
     __weak __typeof__(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *error = nil;
-        BOOL ok = Theft4ExtractZip(zip, destination, ^(double fraction) {
+        // ZIP or Xbox 360 ISO is decided by the file's own signature, not its name.
+        const NSInteger kind = Theft4DetectGameArchive(zip);
+        NSString *label = kind == 2 ? @"ISO" : @"ZIP";
+        void (^progress)(double) = ^(double fraction) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 __typeof__(self) strongSelf = weakSelf;
                 if (!strongSelf) return;
+                strongSelf->_installationTitle.text = kind == 2 ? @"EXTRACTING XBOX 360 ISO" : @"EXTRACTING GAME FILES";
                 strongSelf->_installationDetail.text = [NSString stringWithFormat:
-                    @"%d%%\n\nKeep Theft4 open. The ZIP is deleted when this finishes.", (int)(fraction * 100.0)];
+                    @"%d%%\n\nKeep Theft4 open. The %@ is deleted when this finishes.", (int)(fraction * 100.0), label];
             });
-        }, nil, &error);
+        };
+        BOOL ok = NO;
+        if (kind == 1) {
+            ok = Theft4ExtractZip(zip, destination, progress, nil, &error);
+        } else if (kind == 2) {
+            ok = Theft4ExtractXboxISO(zip, destination, progress, &error);
+        } else {
+            error = @"That file isn't a ZIP or an Xbox 360 ISO.";
+        }
         if (ok && !Theft4FlattenGameFolder(destination)) {
             ok = NO;
-            error = @"The ZIP was extracted, but no default.xex was found in it. Zip the contents of the extracted game folder.";
+            error = kind == 2
+                ? @"The ISO was extracted, but no default.xex was found. Make sure it's the GTA IV Xbox 360 disc."
+                : @"The ZIP was extracted, but no default.xex was found in it. Zip the contents of the extracted game folder.";
         }
         // Downloaded ZIPs are always removed to free space; a ZIP picked from
         // Files is removed only after a successful extraction.
