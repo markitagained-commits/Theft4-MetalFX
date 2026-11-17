@@ -294,7 +294,7 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
         _metalfxUpscaling = [UISwitch new];
         _metalfxUpscaling.onTintColor = Ink(0x35CDD1);
         _metalfxUpscaling.accessibilityIdentifier = @"settings.metalfxUpscaling";
-        _metalfxMode = ChoiceControl(@[@"Native", @"Quality", @"Perf.", @"Ultra Perf."], @"metalfxMode",
+        _metalfxMode = ChoiceControl(@[@"Native", @"Quality", @"Performance", @"Ultra Performance"], @"metalfxMode",
             @"MetalFX mode", @"Applies at the next game launch.");
         {
             NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
@@ -312,9 +312,39 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
             forControlEvents:UIControlEventValueChanged];
         [_fsrUpscaling addTarget:self action:@selector(fsrToggledForMetalFX:)
             forControlEvents:UIControlEventValueChanged];
-        _metalfxModeRow = [self choice:@"METALFX MODE"
-            detail:@"Native renders at full screen resolution with no upscale. Quality 1.5×, Performance 2×, Ultra Performance 3× lower internal resolution, upscaled by MetalFX. Overrides Internal Resolution. Applies at the next game launch."
-            control:_metalfxMode];
+        // Full mode names in a pop-up menu; _metalfxMode stays the model.
+        NSArray<NSString *> *modeNames = @[@"Native", @"Quality", @"Performance", @"Ultra Performance"];
+        NSMutableArray<UIAction *> *modeActions = [NSMutableArray new];
+        __weak __typeof__(self) weakSelf = self;
+        for (NSUInteger i = 0; i < modeNames.count; ++i) {
+            UIAction *action = [UIAction actionWithTitle:modeNames[i] image:nil identifier:nil
+                handler:^(__kindof UIAction *a) {
+                __typeof__(self) strongSelf = weakSelf;
+                if (!strongSelf) return;
+                strongSelf->_metalfxMode.selectedSegmentIndex = (NSInteger)i;
+                [strongSelf metalfxModeChanged:strongSelf->_metalfxMode];
+            }];
+            action.state = (NSInteger)i == _metalfxMode.selectedSegmentIndex ? UIMenuElementStateOn : UIMenuElementStateOff;
+            [modeActions addObject:action];
+        }
+        UIButtonConfiguration *modeConfig = UIButtonConfiguration.tintedButtonConfiguration;
+        modeConfig.baseForegroundColor = Ink(0xECE7D7);
+        modeConfig.baseBackgroundColor = Ink(0x35CDD1);
+        modeConfig.title = modeNames[MAX(0, MIN(3, _metalfxMode.selectedSegmentIndex))];
+        modeConfig.image = [UIImage systemImageNamed:@"chevron.up.chevron.down"];
+        modeConfig.imagePlacement = NSDirectionalRectEdgeTrailing;
+        modeConfig.imagePadding = 8;
+        UIButton *modeButton = [UIButton buttonWithConfiguration:modeConfig primaryAction:nil];
+        modeButton.menu = [UIMenu menuWithChildren:modeActions];
+        modeButton.showsMenuAsPrimaryAction = YES;
+        modeButton.changesSelectionAsPrimaryAction = YES;
+        modeButton.accessibilityIdentifier = @"settings.metalfxMode";
+        modeButton.accessibilityLabel = @"MetalFX mode";
+        [modeButton.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+        UILabel *modeLabel = Copy(@"METALFX MODE", 14, YES);
+        modeLabel.textColor = Ink(0xECE7D7);
+        _metalfxModeRow = Column(@[modeLabel, modeButton,
+            Copy(@"Native: full screen resolution, no upscaling (sharpest, slowest). Quality: renders 1.5× lower, then upscales. Performance: renders 2× lower. Ultra Performance: renders 3× lower (fastest, softest). Overrides Internal Resolution. Applies at the next game launch.", 12, NO)], 7);
         _metalfxModeRow.hidden = !_metalfxUpscaling.on;
         [graphicsRows addObjectsFromArray:@[
             [self setting:@"METALFX UPSCALING"
@@ -357,9 +387,9 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
             Copy(@"Auto Optimize selects a starting profile for this device. Original restores 720p, original shadow/distance/detail/reflections, and the title's blur. You can adjust each setting afterward.", 12, NO)
         ]];
         // Theft4-MetalFX: city density (CPU). Values index Low/Med/High/Stock.
-        _trafficDensity = ChoiceControl(@[@"Low", @"Med", @"High", @"Stock"], @"trafficDensity",
+        _trafficDensity = ChoiceControl(@[@"Low", @"Medium", @"High", @"Stock"], @"trafficDensity",
             @"Traffic density", @"Applies at the next game launch.");
-        _pedDensity = ChoiceControl(@[@"Low", @"Med", @"High", @"Stock"], @"pedDensity",
+        _pedDensity = ChoiceControl(@[@"Low", @"Medium", @"High", @"Stock"], @"pedDensity",
             @"Pedestrian density", @"Applies at the next game launch.");
         {
             NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
@@ -371,10 +401,10 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
         [_trafficDensity addTarget:self action:@selector(trafficDensityChanged:) forControlEvents:UIControlEventValueChanged];
         [_pedDensity addTarget:self action:@selector(pedDensityChanged:) forControlEvents:UIControlEventValueChanged];
         [graphicsRows addObject:[self choice:@"TRAFFIC DENSITY"
-            detail:@"Amount of cars driving and parked. Lower saves CPU. Low 35%, Med 60%, High 80% of stock. Applies at the next game launch."
+            detail:@"Amount of cars driving and parked. Lower saves CPU. Low 35%, Medium 60%, High 80% of stock. Applies at the next game launch."
             control:_trafficDensity]];
         [graphicsRows addObject:[self choice:@"PEDESTRIAN DENSITY"
-            detail:@"Amount of people on the street. Lower saves CPU. Low 35%, Med 60%, High 80% of stock. Applies at the next game launch."
+            detail:@"Amount of people on the street. Lower saves CPU. Low 35%, Medium 60%, High 80% of stock. Applies at the next game launch."
             control:_pedDensity]];
     }
 
