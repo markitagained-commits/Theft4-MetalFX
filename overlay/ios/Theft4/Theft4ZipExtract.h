@@ -17,11 +17,14 @@ BOOL Theft4ExtractZip(NSString *zipPath, NSString *destination,
 // destination/default.xex exists afterwards.
 BOOL Theft4FlattenGameFolder(NSString *destination);
 
-// Downloads a direct link to a file on disk with progress, on the main queue.
+// Download-manager style: up to 8 parallel connections with byte ranges,
+// per-part resume and retry, share-link fixing, speed reporting.
+// progress and completion run on the main queue. expected is -1 if unknown.
 @interface Theft4GameDownload : NSObject
 + (instancetype)startWithURL:(NSURL *)url
                  destination:(NSString *)path
-                    progress:(void (^)(int64_t received, int64_t expected))progress
+                    progress:(void (^)(int64_t received, int64_t expected,
+                                       double bytesPerSecond, int connections))progress
                   completion:(void (^)(NSString *_Nullable error))completion;
 - (void)cancel;
 @end

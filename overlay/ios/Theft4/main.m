@@ -1788,17 +1788,26 @@ static void bootEvent(void *context, const char *event) {
                     actionTitle:@"" spinner:YES step:Theft4InstallationStepCheckingBaseGame];
     __weak __typeof__(self) weakSelf = self;
     _gameDownload = [Theft4GameDownload startWithURL:url destination:zip
-        progress:^(int64_t received, int64_t expected) {
+        progress:^(int64_t received, int64_t expected, double speed, int connections) {
             __typeof__(self) strongSelf = weakSelf;
             if (!strongSelf) return;
-            NSString *got = [NSByteCountFormatter stringFromByteCount:received
-                countStyle:NSByteCountFormatterCountStyleFile];
+            NSByteCountFormatterCountStyle st = NSByteCountFormatterCountStyleFile;
+            NSString *got = [NSByteCountFormatter stringFromByteCount:received countStyle:st];
+            NSString *rate = [NSString stringWithFormat:@"%@/s",
+                [NSByteCountFormatter stringFromByteCount:(int64_t)speed countStyle:st]];
+            NSString *eta = @"";
+            if (expected > 0 && speed > 1) {
+                long secs = (long)((double)(expected - received) / speed);
+                eta = secs >= 3600 ? [NSString stringWithFormat:@" · %ldh %02ldm left", secs / 3600, (secs / 60) % 60]
+                                   : [NSString stringWithFormat:@" · %ldm %02lds left", secs / 60, secs % 60];
+            }
+            NSString *line2 = [NSString stringWithFormat:@"%@ · %d connection%@%@",
+                rate, connections, connections == 1 ? @"" : @"s", eta];
             strongSelf->_installationDetail.text = expected > 0
-                ? [NSString stringWithFormat:@"%d%% · %@ of %@\n\nKeep Theft4 open and your phone awake.",
+                ? [NSString stringWithFormat:@"%d%% · %@ of %@\n%@\n\nKeep Theft4 open. Drops resume on their own.",
                     (int)(100.0 * (double)received / (double)expected), got,
-                    [NSByteCountFormatter stringFromByteCount:expected
-                        countStyle:NSByteCountFormatterCountStyleFile]]
-                : [NSString stringWithFormat:@"%@ downloaded\n\nKeep Theft4 open and your phone awake.", got];
+                    [NSByteCountFormatter stringFromByteCount:expected countStyle:st], line2]
+                : [NSString stringWithFormat:@"%@ downloaded\n%@\n\nKeep Theft4 open. Drops resume on their own.", got, line2];
         }
         completion:^(NSString *error) {
             __typeof__(self) strongSelf = weakSelf;
