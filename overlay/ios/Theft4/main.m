@@ -1923,6 +1923,43 @@ static void bootEvent(void *context, const char *event) {
         const double seconds = CFAbsoluteTimeGetCurrent() - began;
         NSLog(@"[Theft4] %@ extract %@ in %.1fs (%.0f MB/s)", label, ok ? @"ok" : @"failed",
               seconds, seconds > 0 ? archiveBytes / seconds / 1e6 : 0);
+        // ZIP that holds an Xbox 360 ISO instead of a game folder: extract the
+        // ZIP first, then the ISO inside it, then delete that ISO.
+        if (ok && kind == 1 && !Theft4FlattenGameFolder(staging)) {
+            NSString *innerISO = nil;
+            unsigned long long innerSize = 0;
+            NSDirectoryEnumerator *walk = [fm enumeratorAtPath:staging];
+            for (NSString *rel in walk) {
+                if (![walk.fileAttributes[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
+                unsigned long long sz = [walk.fileAttributes[NSFileSize] unsignedLongLongValue];
+                if (sz < 64ULL * 1024 * 1024 || sz <= innerSize) continue;
+                NSString *full = [staging stringByAppendingPathComponent:rel];
+                if (Theft4DetectGameArchive(full) == 2) { innerISO = full; innerSize = sz; }
+            }
+            if (innerISO) {
+                NSString *isoOut = [staging stringByAppendingPathComponent:@"Theft4-FromISO"];
+                const CFAbsoluteTime isoBegan = CFAbsoluteTimeGetCurrent();
+                __block CFAbsoluteTime isoLastUI = 0;
+                ok = Theft4ExtractXboxISO(innerISO, isoOut, ^(double fraction) {
+                    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+                    if (fraction < 1.0 && now - isoLastUI < 0.2) return;
+                    isoLastUI = now;
+                    double rate = now > isoBegan ? fraction * (double)innerSize / (now - isoBegan) : 0;
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        __typeof__(self) strongSelf = weakSelf;
+                        if (!strongSelf) return;
+                        strongSelf->_installationTitle.text = @"STEP 2 OF 2 · EXTRACTING ISO FROM ZIP";
+                        strongSelf->_installationDetail.text = [NSString stringWithFormat:
+                            @"%d%% · %@/s\nEvery file is checked as it's written.\n\nKeep Theft4 open. The ZIP and ISO are deleted when this finishes.",
+                            (int)(fraction * 100.0),
+                            [NSByteCountFormatter stringFromByteCount:(int64_t)rate countStyle:NSByteCountFormatterCountStyleFile]];
+                    });
+                }, &error);
+                [fm removeItemAtPath:innerISO error:nil];
+                NSLog(@"[Theft4] inner ISO extract %@ in %.1fs", ok ? @"ok" : @"failed",
+                      CFAbsoluteTimeGetCurrent() - isoBegan);
+            }
+        }
         if (ok && !Theft4FlattenGameFolder(staging)) {
             ok = NO;
             error = kind == 2
