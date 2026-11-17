@@ -272,7 +272,7 @@ BOOL Theft4FlattenGameFolder(NSString *destination) {
 // 1. Fixes share links (Dropbox dl=0, Google Drive /file/d/ID) to direct links.
 // 2. Probes with "Range: bytes=0-0" after redirects. HTML answers are rejected.
 // 3. When the server takes byte ranges, the file is preallocated and split
-//    into up to 8 parts, each on its own NSURLSession (its own TCP connection,
+//    into up to 16 parts, each on its own NSURLSession (its own TCP connection,
 //    so parts are not squeezed into one HTTP/2 pipe). When a part finishes,
 //    it takes half of the biggest part still running, so the tail stays fast.
 // 4. A part that drops resumes from its last byte, up to 10 tries with backoff
@@ -280,8 +280,8 @@ BOOL Theft4FlattenGameFolder(NSString *destination) {
 // 5. Speed is a 2-second moving rate. The file must start with "PK".
 // ---------------------------------------------------------------------------
 
-static const int kMaxParts = 8;
-static const int64_t kMinPart = 4LL * 1024 * 1024;
+static const int kMaxParts = 16;      // FDM max per download
+static const int64_t kMinPart = 2LL * 1024 * 1024;
 static const int kMaxRetries = 10;
 
 @interface Theft4DownloadPart : NSObject

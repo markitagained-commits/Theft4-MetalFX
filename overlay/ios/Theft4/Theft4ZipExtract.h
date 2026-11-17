@@ -17,7 +17,7 @@ BOOL Theft4ExtractZip(NSString *zipPath, NSString *destination,
 // destination/default.xex exists afterwards.
 BOOL Theft4FlattenGameFolder(NSString *destination);
 
-// Download-manager style: up to 8 parallel connections with byte ranges,
+// Download-manager style: up to 16 parallel connections with byte ranges,
 // per-part resume and retry, share-link fixing, speed reporting.
 // progress and completion run on the main queue. expected is -1 if unknown.
 @interface Theft4GameDownload : NSObject
