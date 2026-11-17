@@ -1883,32 +1883,54 @@ static void bootEvent(void *context, const char *event) {
     __weak __typeof__(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *error = nil;
+        NSFileManager *fm = NSFileManager.defaultManager;
         // ZIP or Xbox 360 ISO is decided by the file's own signature, not its name.
         const NSInteger kind = Theft4DetectGameArchive(zip);
         NSString *label = kind == 2 ? @"ISO" : @"ZIP";
+        // Extract into a hidden staging folder on the same disk. Only a fully
+        // verified extraction is moved into the game folder, so a failure can
+        // never leave half-written or mixed files behind.
+        NSString *staging = [[destination stringByDeletingLastPathComponent]
+            stringByAppendingPathComponent:@".Theft4-Incoming"];
+        [fm removeItemAtPath:staging error:nil];
+        const double archiveBytes = [[fm attributesOfItemAtPath:zip error:nil][NSFileSize] doubleValue];
+        const CFAbsoluteTime began = CFAbsoluteTimeGetCurrent();
+        __block CFAbsoluteTime lastUI = 0;
         void (^progress)(double) = ^(double fraction) {
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            if (fraction < 1.0 && now - lastUI < 0.2) return;
+            lastUI = now;
+            double rate = now > began ? fraction * archiveBytes / (now - began) : 0;
             dispatch_async(dispatch_get_main_queue(), ^{
                 __typeof__(self) strongSelf = weakSelf;
                 if (!strongSelf) return;
                 strongSelf->_installationTitle.text = kind == 2 ? @"EXTRACTING XBOX 360 ISO" : @"EXTRACTING GAME FILES";
                 strongSelf->_installationDetail.text = [NSString stringWithFormat:
-                    @"%d%%\n\nKeep Theft4 open. The %@ is deleted when this finishes.", (int)(fraction * 100.0), label];
+                    @"%d%% · %@/s\nEvery file is checked as it's written.\n\nKeep Theft4 open. The %@ is deleted when this finishes.",
+                    (int)(fraction * 100.0),
+                    [NSByteCountFormatter stringFromByteCount:(int64_t)rate countStyle:NSByteCountFormatterCountStyleFile],
+                    label];
             });
         };
         BOOL ok = NO;
         if (kind == 1) {
-            ok = Theft4ExtractZip(zip, destination, progress, nil, &error);
+            ok = Theft4ExtractZip(zip, staging, progress, nil, &error);
         } else if (kind == 2) {
-            ok = Theft4ExtractXboxISO(zip, destination, progress, &error);
+            ok = Theft4ExtractXboxISO(zip, staging, progress, &error);
         } else {
             error = @"That file isn't a ZIP or an Xbox 360 ISO.";
         }
-        if (ok && !Theft4FlattenGameFolder(destination)) {
+        const double seconds = CFAbsoluteTimeGetCurrent() - began;
+        NSLog(@"[Theft4] %@ extract %@ in %.1fs (%.0f MB/s)", label, ok ? @"ok" : @"failed",
+              seconds, seconds > 0 ? archiveBytes / seconds / 1e6 : 0);
+        if (ok && !Theft4FlattenGameFolder(staging)) {
             ok = NO;
             error = kind == 2
                 ? @"The ISO was extracted, but no default.xex was found. Make sure it's the GTA IV Xbox 360 disc."
                 : @"The ZIP was extracted, but no default.xex was found in it. Zip the contents of the extracted game folder.";
         }
+        if (ok) ok = Theft4MoveFolderContents(staging, destination, nil, &error);
+        [fm removeItemAtPath:staging error:nil];
         // Downloaded ZIPs are always removed to free space; a ZIP picked from
         // Files is removed only after a successful extraction.
         if (!scopedURL || ok) [NSFileManager.defaultManager removeItemAtPath:zip error:nil];

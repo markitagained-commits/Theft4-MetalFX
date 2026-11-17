@@ -420,6 +420,7 @@ static NSURL *Theft4DirectLink(NSURL *url) {
     BOOL _finished;
     BOOL _started;
     NSString *_probeError;
+    NSString *_etag;               // every part must come from the same file version
     // speed
     NSMutableArray<NSArray<NSNumber *> *> *_samples;
     CFAbsoluteTime _lastReport;
@@ -500,6 +501,7 @@ static NSURL *Theft4DirectLink(NSURL *url) {
         return;
     }
     if (http.URL) _url = http.URL;            // keep the final URL after redirects
+    _etag = [http valueForHTTPHeaderField:@"ETag"];
     BOOL ranged = NO;
     if (http.statusCode == 206) {
         // A 206 without a total is treated as "size unknown, no ranges".
@@ -586,6 +588,12 @@ didReceiveResponse:(NSURLResponse *)response
     NSInteger want = p.ranged ? 206 : 200;
     if (!p || !http || http.statusCode != want) {
         handler(NSURLSessionResponseCancel);   // counted as a failed try
+        return;
+    }
+    NSString *etag = [http valueForHTTPHeaderField:@"ETag"];
+    if (_etag.length && etag.length && ![etag isEqualToString:_etag]) {
+        handler(NSURLSessionResponseCancel);
+        [self finish:@"The file changed on the server while downloading. Start the download again."];
         return;
     }
     handler(NSURLSessionResponseAllow);

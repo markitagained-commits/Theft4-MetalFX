@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <errno.h>
+#include <unistd.h>
 #include <functional>
 #include <set>
 #include <string>
@@ -47,6 +48,22 @@ inline bool detect(FILE *f, uint64_t *partition, uint32_t *rootSector, uint32_t 
         return true;
     }
     return false;
+}
+
+inline uint32_t crc32(uint32_t crc, const uint8_t *p, size_t n) {
+    static uint32_t table[256];
+    static bool ready = false;
+    if (!ready) {
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            table[i] = c;
+        }
+        ready = true;
+    }
+    crc = ~crc;
+    while (n--) crc = table[(crc ^ *p++) & 0xFF] ^ (crc >> 8);
+    return ~crc;
 }
 
 inline bool safeName(const std::string &n) {
@@ -119,7 +136,7 @@ inline bool extract(const std::string &iso, const std::string &dest,
     uint64_t all = 0, done = 0;
     for (auto &i : items) all += i.size;
     if (!mkdirs(dest)) { fclose(f); err = "Could not create the game folder."; return false; }
-    std::vector<uint8_t> buf(4 << 20);
+    std::vector<uint8_t> buf(8 << 20);   // 8 MB chunks: few syscalls, fast on NVMe
     double last = -1;
     for (auto &i : items) {
         std::string out = dest + "/" + i.path;
@@ -130,16 +147,32 @@ inline bool extract(const std::string &iso, const std::string &dest,
         if (!o) { fclose(f); err = "Could not write " + i.path + ". Check free storage."; return false; }
         if (fseeko(f, (off_t)i.offset, SEEK_SET) != 0) { fclose(o); fclose(f); err = "Could not read " + i.path; return false; }
         uint64_t left = i.size;
+        uint32_t want = 0;
         while (left) {
             if (cancelled && cancelled()) { fclose(o); fclose(f); err = "Cancelled."; return false; }
             size_t n = (size_t)std::min<uint64_t>(left, buf.size());
             if (fread(buf.data(), 1, n, f) != n) { fclose(o); fclose(f); err = "Could not read " + i.path + ". The ISO may be incomplete."; return false; }
+            want = crc32(want, buf.data(), n);
             if (fwrite(buf.data(), 1, n, o) != n) { fclose(o); fclose(f); err = "Could not write " + i.path + ". Check free storage."; return false; }
             left -= n; done += n;
             double p = all ? (double)done / (double)all : 1.0;
             if (progress && p - last >= 0.005) { last = p; progress(p); }
         }
-        if (fclose(o) != 0) { fclose(f); err = "Could not finish " + i.path + ". Check free storage."; return false; }
+        if (fflush(o) != 0 || fclose(o) != 0) { fclose(f); err = "Could not finish " + i.path + ". Check free storage."; return false; }
+        // Verify: re-read what landed on disk and compare it to the ISO bytes.
+        FILE *chk = fopen(out.c_str(), "rb");
+        if (!chk) { fclose(f); err = "Could not verify " + i.path + "."; return false; }
+        uint64_t got = fileSize(chk);
+        uint32_t c2 = 0;
+        if (got == i.size) {
+            fseeko(chk, 0, SEEK_SET);
+            size_t n;
+            while ((n = fread(buf.data(), 1, buf.size(), chk)) > 0) c2 = crc32(c2, buf.data(), n);
+        }
+        fclose(chk);
+        if (got != i.size || c2 != want) {
+            fclose(f); err = i.path + " came out corrupted on disk. Free up storage and try again."; return false;
+        }
     }
     fclose(f);
     if (progress) progress(1.0);
