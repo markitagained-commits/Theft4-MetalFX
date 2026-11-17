@@ -34,7 +34,6 @@ jobs:
           xcrun simctl delete all || true
           sudo rm -rf ~/Library/Developer/CoreSimulator || true
           sudo rm -rf ~/Library/Android /usr/local/share/dotnet /usr/local/lib/node_modules || true
-          for x in /Applications/Xcode_*.app; do echo "$x"; done
           df -h /
 
       - name: Select Xcode
@@ -43,9 +42,9 @@ jobs:
           [ -z "$xcode" ] && xcode="$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)"
           sudo xcode-select -s "$xcode"
           xcodebuild -version
+          echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
           sudo xcodebuild -downloadComponent MetalToolchain || true
           xcrun -sdk iphoneos --show-sdk-version
-          for x in /Applications/Xcode_*.app; do [ "$x" != "$xcode" ] && sudo rm -rf "$x" || true; done
           df -h /
           brew install ninja || true
           cmake --version
@@ -72,7 +71,7 @@ jobs:
             third_party/SPIRV-Tools third_party/SPIRV-Headers third_party/Vulkan-Headers third_party/cereal
           cmake -S "$GITHUB_WORKSPACE/ci/moltenvk-ios" -B "$RUNNER_TEMP/mvk-build" -G Ninja \
             -DTP="$RUNNER_TEMP/XeniOS/third_party" \
-            -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT="$(xcrun --sdk iphoneos --show-sdk-path)" -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0 -DCMAKE_BUILD_TYPE=Release
           cmake --build "$RUNNER_TEMP/mvk-build" --target theft4_libs --parallel "$(sysctl -n hw.ncpu)"
           libdir="$RUNNER_TEMP/ios-libs"; mkdir -p "$libdir"
