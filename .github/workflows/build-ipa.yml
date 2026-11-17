@@ -144,10 +144,34 @@ jobs:
             --target metal_shader_export metal_host_shader_export
           out/direct-metal/build/metal_shader_export out/direct-metal/corpus
           out/direct-metal/build/metal_host_shader_export out/direct-metal/host-corpus
-          xcodebuild -showComponent MetalToolchain -json || true
-          metal_bin="$(xcrun -sdk iphoneos -f metal)"; echo "metal: $metal_bin"
-          metal_dir="$(dirname "$metal_bin")"
-          python3 tools/direct-metal/compile_shaders.py --compiler-directory "$metal_dir" out/direct-metal/corpus out/direct-metal/ios --platform ios
+          # Xcode 26 ships `metal` as a downloadable component mounted under
+          # root's home, which the runner user can't remount. Install it for
+          # this user, then fall back to the toolchain asset directly.
+          xcodebuild -downloadComponent MetalToolchain || true
+          metal_dir=""
+          if xcrun -sdk iphoneos metal --version >/dev/null 2>&1; then
+            metal_dir="$(dirname "$(xcrun -sdk iphoneos -f metal)")"
+          fi
+          if [ -z "$metal_dir" ]; then
+            for m in $(sudo find /System/Library/AssetsV2/com_apple_MobileAsset_MetalToolchain \
+                         "$HOME/Library/Developer/DVTDownloads" /private/var/root/Library/Developer/DVTDownloads \
+                         -path '*usr/bin/metal' -type f 2>/dev/null); do
+              d="$RUNNER_TEMP/metaltc"; sudo rm -rf "$d"; sudo cp -R "${m%/usr/bin/metal}" "$d"
+              sudo chown -R "$(id -u)" "$d"
+              if "$d/usr/bin/metal" --version; then metal_dir="$d/usr/bin"; break; fi
+            done
+          fi
+          if [ -z "$metal_dir" ]; then
+            for img in $(sudo find /System/Library/AssetsV2/com_apple_MobileAsset_MetalToolchain -name '*.dmg' 2>/dev/null); do
+              mp="$RUNNER_TEMP/metalmnt"; mkdir -p "$mp"
+              hdiutil attach -nobrowse -readonly -mountpoint "$mp" "$img" || continue
+              m=$(find "$mp" -path '*usr/bin/metal' -type f | head -1)
+              if [ -n "$m" ] && "$m" --version; then metal_dir="$(dirname "$m")"; break; fi
+            done
+          fi
+          test -n "$metal_dir" || { echo "::error::no usable Metal compiler found"; exit 1; }
+          echo "metal dir: $metal_dir"
+          python3 tools/direct-metal/compile_shaders.py --compiler-directory "$metal_dir" out/direct-metal/corpus out/direct-metal/ios --platform ios || { for f in $(ls out/direct-metal/ios/*.log | head -3); do echo "== $f"; head -30 "$f"; done; exit 1; }
           python3 tools/direct-metal/compile_shaders.py --compiler-directory "$metal_dir" out/direct-metal/host-corpus out/direct-metal/ios/Host --platform ios
           echo "THEFT4_METAL_LIBRARIES=$PWD/out/direct-metal/ios" >> "$GITHUB_ENV"
           echo "THEFT4_METAL_HOST_LIBRARIES=$PWD/out/direct-metal/ios/Host" >> "$GITHUB_ENV"
