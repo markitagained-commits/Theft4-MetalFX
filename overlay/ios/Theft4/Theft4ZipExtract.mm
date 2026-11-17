@@ -328,11 +328,14 @@ BOOL Theft4MoveFolderContents(NSString *source, NSString *destination,
         NSError *err = nil;
         if (![fm moveItemAtPath:from toPath:to error:&err]) {
             err = nil;
+            // Different disk (iCloud, USB): copy, then delete the original so it's a move.
             if (![fm copyItemAtPath:from toPath:to error:&err]) {
+                [fm removeItemAtPath:to error:nil];
                 if (error) *error = [NSString stringWithFormat:@"Could not move %@: %@", name,
                     err.localizedDescription ?: @"check free storage."];
                 return NO;
             }
+            [fm removeItemAtPath:from error:nil];
         }
         done += size;
         if (progress) progress(total ? (double)done / (double)total : 1.0);

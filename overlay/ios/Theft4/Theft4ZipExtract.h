@@ -26,7 +26,7 @@ BOOL Theft4ExtractXboxISO(NSString *isoPath, NSString *destination,
 BOOL Theft4FlattenGameFolder(NSString *destination);
 
 // Moves everything inside source into destination (instant on the same disk);
-// anything that can't be moved, e.g. from iCloud or a USB drive, is copied.
+// from another disk (iCloud, USB) it is copied and the original deleted.
 // progress gets 0..1 by bytes. Existing files in destination are replaced.
 BOOL Theft4MoveFolderContents(NSString *source, NSString *destination,
                               void (^_Nullable progress)(double fraction),

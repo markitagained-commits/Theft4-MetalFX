@@ -602,6 +602,7 @@ static BOOL Theft4InstallSaveExport(NSURL *selected, NSURL *support, NSURL *docu
 - (void)presentInstallationFlowIfNeeded;
 - (void)routeInstallationFlow;
 - (void)checkBaseGame;
+- (BOOL)organizeGameFolder;
 - (void)chooseTitleUpdate;
 - (void)resetAutomaticCaptureForNewSession;
 - (void)recordWindowState:(NSString *)event;
@@ -1563,6 +1564,39 @@ static void bootEvent(void *context, const char *event) {
 }
 #endif
 
+// Returns YES when it started extracting an archive found in the game folder
+// (the extraction then finishes the check). Wrapper folders are moved, never copied.
+- (BOOL)organizeGameFolder {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *game = _gameURL.path;
+    if ([fm fileExistsAtPath:[game stringByAppendingPathComponent:@"default.xex"]]) return NO;
+    if (Theft4FlattenGameFolder(game)) {
+        NSLog(@"[Theft4] moved nested game folder into place");
+        return NO;
+    }
+    // A ZIP or Xbox 360 ISO dropped in the game folder or next to it.
+    NSString *best = nil;
+    unsigned long long bestSize = 0;
+    for (NSString *dir in @[game, [game stringByDeletingLastPathComponent]]) {
+        NSDirectoryEnumerator *walk = [fm enumeratorAtPath:dir];
+        for (NSString *rel in walk) {
+            if (walk.level > 3) { [walk skipDescendants]; continue; }
+            if ([rel hasPrefix:@".Theft4-Incoming"]) { [walk skipDescendants]; continue; }
+            if (![walk.fileAttributes[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
+            unsigned long long sz = [walk.fileAttributes[NSFileSize] unsignedLongLongValue];
+            if (sz < 64ULL * 1024 * 1024 || sz <= bestSize) continue;
+            NSString *full = [dir stringByAppendingPathComponent:rel];
+            if (Theft4DetectGameArchive(full) != 0) { best = full; bestSize = sz; }
+        }
+        if (best) break;
+    }
+    if (!best) return NO;
+    NSLog(@"[Theft4] found game archive %@, extracting", best.lastPathComponent);
+    // Passing a file URL keeps the archive if extraction fails; it is deleted on success.
+    [self extractGameZip:best scopedURL:[NSURL fileURLWithPath:best]];
+    return YES;
+}
+
 - (void)checkBaseGame {
 #ifdef THEFT4_BC_TEXTURE_COMPATIBILITY
     if (_texturePreparation.running || _textureCacheDeleting) return;
@@ -1570,6 +1604,9 @@ static void bootEvent(void *context, const char *event) {
     if (!_gameURL || _loading || _executionAttempted || _saveTransferBusy ||
         _installationStep == Theft4InstallationStepCheckingBaseGame ||
         _installationStep == Theft4InstallationStepInstallingUpdate) return;
+    // Organize first: if the game landed in a wrapper folder (game/GTA IV/...,
+    // game/game/...), move its contents up to where Theft4 expects them.
+    if (!_gameTransferBusy && [self organizeGameFolder]) return;
     // Check the complete installation first, including an already-patched XEX
     // that the retail-base-only validator would otherwise reject.
     if ([self completeSetupForInstalledGame]) return;
@@ -1847,7 +1884,7 @@ static void bootEvent(void *context, const char *event) {
     _gameTransferBusy = YES;
     UIApplication.sharedApplication.idleTimerDisabled = YES;
     [self showInstallationTitle:@"MOVING GAME FILES"
-                         detail:@"0%\n\nKeep Theft4 open. Files on this iPhone move instantly; iCloud or USB files are copied."
+                         detail:@"0%\n\nKeep Theft4 open. Files on this iPhone move instantly; from iCloud or USB they're moved over."
                     actionTitle:@"" spinner:YES step:Theft4InstallationStepCheckingBaseGame];
     NSString *destination = _gameURL.path;
     __weak __typeof__(self) weakSelf = self;
@@ -1858,7 +1895,7 @@ static void bootEvent(void *context, const char *event) {
                 __typeof__(self) strongSelf = weakSelf;
                 if (!strongSelf) return;
                 strongSelf->_installationDetail.text = [NSString stringWithFormat:
-                    @"%d%%\n\nKeep Theft4 open. Files on this iPhone move instantly; iCloud or USB files are copied.",
+                    @"%d%%\n\nKeep Theft4 open. Files on this iPhone move instantly; from iCloud or USB they're moved over.",
                     (int)(fraction * 100.0)];
             });
         }, &error);
