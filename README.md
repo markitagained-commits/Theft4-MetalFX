@@ -1,10 +1,10 @@
 # Theft4-MetalFX
 
-A mod of [Theft4](https://github.com/KoreanSeats1/Theft4) by KoreanSeats1, the GTA IV port for iPhone. Theft4 itself is their work, not mine. I just added MetalFX upscaling, lighter traffic, and an easier way to get your game files in, to make it run smoother.
+An improved version of [Theft4](https://github.com/KoreanSeats1/Theft4) by KoreanSeats1, the GTA IV port for iPhone. Theft4 is their work, not mine. I built on top of it and added MetalFX upscaling, lighter traffic, and an easier way to get your game files in, to make it run smoother.
 
 You need your own legally dumped Xbox 360 copy of GTA IV. No game files come with this.
 
-## What this mod adds
+## What I improved
 
 ### Load your game files without the hassle
 On first open, tap **LOAD GAME FILES** and pick how you want to do it:
@@ -57,7 +57,7 @@ Missions that clear the streets still work. Settings kick in next time you launc
 GitHub Actions builds the IPA and posts it to Releases. Actions → Run workflow, and pick `macos-26` or `macos-26-intel` for the runner.
 
 ## Heads up
-This is an unofficial mod, so report problems here, not to the Theft4 devs. Still experimental. The new loader, ISO unpacking, and downloader haven't been fully tested on a real device yet.
+This is an unofficial improved version, so report problems here, not to the Theft4 devs. Still experimental. The new loader, ISO unpacking, and downloader haven't been fully tested on a real device yet.
 
 ## License
 GPL-3.0, same as Theft4 (see `COPYING`). All credit for Theft4 goes to KoreanSeats1 and its contributors.
