@@ -7,19 +7,19 @@ You need your own legally dumped Xbox 360 copy of GTA IV. No game files come wit
 ## What I improved
 
 ### Load your game files without the hassle
-On first open, tap **LOAD GAME FILES** and pick how you want to do it:
+On first open the loader appears right away (no setup screen to get past). If you close it, tap **LOAD GAME FILES** to bring it back. Pick how you want to do it:
 
-- **Download ZIP/ISO From Link** – paste a direct link (Dropbox and Google Drive share links work). It downloads over 16 connections at once, like a download manager, shows MB/s and time left, and picks back up if a piece fails.
+- **Download ZIP/ISO From Link** – paste a direct download link that starts the file right away (use `https://`; plain `http://` links may be blocked by iOS). Dropbox and Google Drive share links work. It downloads over 16 connections at once, like a download manager, shows MB/s and time left, and picks back up if a piece fails.
 - **Select ZIP/ISO From Files** – pick a ZIP or an Xbox 360 ISO and it gets unpacked for you. A ZIP with an ISO inside works too. It checks what the file really is, not just the name.
 - **Select Game Folder From Files** – pick an already unpacked game folder and it gets moved into place. No leftover copy eating your storage.
 - **Check For Game Files** – finds your game even if it's buried in extra folders, cleans that up, and unpacks any ZIP or ISO you dropped in the game folder.
 
-Everything unpacks into a temp folder first and every file gets checked before it's swapped in, so a failed or cut-off download won't break a working install.
+ZIPs and ISOs unpack into a temp folder first and every file is checked (ZIP CRC, ISO re-read) before anything is moved into place. A picked game folder is moved in without a check. ZIPs and ISOs are deleted after extraction, so you need space for the archive and the extracted game at the same time.
 
 ### MetalFX upscaling
 Renders the game at a lower resolution and lets Apple's MetalFX sharpen it back up to your screen. More FPS, and it looks a lot cleaner than just dropping the resolution.
 
-Launcher → Graphics → **METALFX UPSCALER**
+Launcher → Graphics → turn on **METALFX UPSCALING**, then pick a **METALFX MODE**. It is off by default. Turning it on turns FSR off and overrides Internal Resolution.
 
 | Mode | Renders at |
 |---|---|
@@ -31,7 +31,7 @@ Launcher → Graphics → **METALFX UPSCALER**
 ### Traffic and pedestrians
 Fewer cars and people means less work for the CPU, which is usually what holds phones back.
 
-Launcher → Graphics → **TRAFFIC** and **PEDESTRIANS**
+Launcher → Graphics → **TRAFFIC DENSITY** and **PEDESTRIAN DENSITY**
 
 | Setting | Amount |
 |---|---|

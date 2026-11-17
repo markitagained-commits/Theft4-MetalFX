@@ -565,6 +565,7 @@ static BOOL Theft4InstallSaveExport(NSURL *selected, NSURL *support, NSURL *docu
     BOOL _installationFlowPresented;
     BOOL _baseGameChecked;
     BOOL _baseGameCheckAttempted;
+    BOOL _autoOfferedGameSources;
     BOOL _setupValidated;
 #ifdef THEFT4_BC_TEXTURE_COMPATIBILITY
     Theft4TexturePreparation *_texturePreparation;
@@ -1389,16 +1390,29 @@ static void bootEvent(void *context, const char *event) {
     const BOOL hasBase = [NSFileManager.defaultManager
         fileExistsAtPath:[[_gameURL URLByAppendingPathComponent:@"default.xex"] path]];
     if (!hasBase) {
+        // No "quit the app and copy files in Files" instructions: the loader is
+        // opened right away, so there is nothing to read or get past.
         NSString *title = _baseGameCheckAttempted ? @"GAME FILES NOT FOUND"
-                                                   : @"QUIT APP & LOAD GAME FILES";
+                                                   : @"LOAD GAME FILES";
         NSString *detail = _baseGameCheckAttempted
-            ? [NSString stringWithFormat:@"No default.xex was found in:\n\n%@\n\nCopy the extracted game contents there, or tap LOAD GAME FILES to download or pick a ZIP or ISO, or pick your game folder.",
-                Theft4FilesGamePath()]
-            : [NSString stringWithFormat:@"In Files, copy the contents of your legally obtained, extracted Xbox 360 GTA IV game into:\n\n%@\n\nThe folder must contain default.xex directly. To use an ISO, tap LOAD GAME FILES instead. When the transfer finishes, reopen %@.\n\nOr tap LOAD GAME FILES to download a ZIP or Xbox 360 ISO from a link, pick one from Files (extracted automatically), or pick your game folder (moved in automatically).",
-                Theft4FilesGamePath(), Theft4DisplayName()];
+            ? @"No game files were found yet. Tap LOAD GAME FILES to download or pick a ZIP or Xbox 360 ISO, or pick your game folder."
+            : @"Download a ZIP or Xbox 360 ISO from a direct link, pick one from Files, or pick your extracted game folder.";
         [self showInstallationTitle:title detail:detail
                         actionTitle:@"LOAD GAME FILES" spinner:NO
                                step:Theft4InstallationStepCopyBaseGame];
+        // Open the loader once automatically on a fresh launch.
+        if (!_autoOfferedGameSources && !_baseGameCheckAttempted) {
+            _autoOfferedGameSources = YES;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                // Not on screen yet, or another sheet is up: try again on the
+                // next routing pass instead of dropping the offer.
+                if (!self.view.window || self.presentedViewController) {
+                    self->_autoOfferedGameSources = NO;
+                    return;
+                }
+                [self offerGameFileSources];
+            });
+        }
         return;
     }
     if (!_baseGameChecked) {

@@ -214,4 +214,4 @@ jobs:
           tag="build-${{ github.run_number }}"
           gh release create "$tag" out/Theft4-MetalFX-0.3.2.ipa \
             --repo "${{ github.repository }}" --title "Theft4 MetalFX (0.3.2) build ${{ github.run_number }}" \
-            --notes "Unsigned IPA. Sideload with AltStore or Sideloadly. Pick the MetalFX upscaler in the launcher (Off, UQ 1.3x, Quality 1.5x, Balanced 1.7x, Performance 2x, Ultra Performance 3x). Default: Performance. Bring your own legally dumped game files." --latest
+            --notes "Unsigned IPA. Sideload with AltStore or Sideloadly. Turn on METALFX UPSCALING in the launcher's Graphics settings and pick a mode (Native, Quality 1.5x, Performance 2x, Ultra Performance 3x). It is Off by default. On first launch the app opens LOAD GAME FILES so you can download or pick a ZIP or Xbox 360 ISO (use a direct https link). Bring your own legally dumped game files." --latest
