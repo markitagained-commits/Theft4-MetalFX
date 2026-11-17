@@ -17,6 +17,13 @@ BOOL Theft4ExtractZip(NSString *zipPath, NSString *destination,
 // destination/default.xex exists afterwards.
 BOOL Theft4FlattenGameFolder(NSString *destination);
 
+// Moves everything inside source into destination (instant on the same disk);
+// anything that can't be moved, e.g. from iCloud or a USB drive, is copied.
+// progress gets 0..1 by bytes. Existing files in destination are replaced.
+BOOL Theft4MoveFolderContents(NSString *source, NSString *destination,
+                              void (^_Nullable progress)(double fraction),
+                              NSString *_Nullable *_Nullable error);
+
 // Download-manager style: up to 16 parallel connections with byte ranges,
 // per-part resume and retry, share-link fixing, speed reporting.
 // progress and completion run on the main queue. expected is -1 if unknown.

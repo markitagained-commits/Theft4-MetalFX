@@ -266,6 +266,59 @@ BOOL Theft4FlattenGameFolder(NSString *destination) {
     return [fm fileExistsAtPath:xex];
 }
 
+BOOL Theft4MoveFolderContents(NSString *source, NSString *destination,
+                              void (^progress)(double), NSString **error) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    source = source.stringByStandardizingPath;
+    destination = destination.stringByStandardizingPath;
+    if ([source isEqualToString:destination]) return YES;   // already in place
+    if ([destination hasPrefix:[source stringByAppendingString:@"/"]]) {
+        if (error) *error = @"Pick the game folder itself, not a folder that contains Theft4.";
+        return NO;
+    }
+    NSArray<NSString *> *top = [fm contentsOfDirectoryAtPath:source error:nil];
+    if (!top.count) { if (error) *error = @"That folder is empty."; return NO; }
+    // Total size for progress.
+    unsigned long long total = 0;
+    NSDirectoryEnumerator *e = [fm enumeratorAtPath:source];
+    for (NSString *rel in e) { (void)rel;
+        NSDictionary *a = e.fileAttributes;
+        if ([a[NSFileType] isEqualToString:NSFileTypeRegular]) total += [a[NSFileSize] unsignedLongLongValue];
+    }
+    [fm createDirectoryAtPath:destination withIntermediateDirectories:YES attributes:nil error:nil];
+    unsigned long long done = 0;
+    for (NSString *name in top) {
+        if ([name isEqualToString:@".DS_Store"] || [name isEqualToString:@"__MACOSX"]) continue;
+        NSString *from = [source stringByAppendingPathComponent:name];
+        NSString *to = [destination stringByAppendingPathComponent:name];
+        unsigned long long size = 0;
+        BOOL isDir = NO;
+        [fm fileExistsAtPath:from isDirectory:&isDir];
+        if (isDir) {
+            NSDirectoryEnumerator *s2 = [fm enumeratorAtPath:from];
+            for (NSString *rel in s2) { (void)rel;
+                NSDictionary *a = s2.fileAttributes;
+                if ([a[NSFileType] isEqualToString:NSFileTypeRegular]) size += [a[NSFileSize] unsignedLongLongValue];
+            }
+        } else {
+            size = [[fm attributesOfItemAtPath:from error:nil][NSFileSize] unsignedLongLongValue];
+        }
+        [fm removeItemAtPath:to error:nil];
+        NSError *err = nil;
+        if (![fm moveItemAtPath:from toPath:to error:&err]) {
+            err = nil;
+            if (![fm copyItemAtPath:from toPath:to error:&err]) {
+                if (error) *error = [NSString stringWithFormat:@"Could not move %@: %@", name,
+                    err.localizedDescription ?: @"check free storage."];
+                return NO;
+            }
+        }
+        done += size;
+        if (progress) progress(total ? (double)done / (double)total : 1.0);
+    }
+    return YES;
+}
+
 // ---------------------------------------------------------------------------
 // Multi-connection downloader (download-manager style).
 //

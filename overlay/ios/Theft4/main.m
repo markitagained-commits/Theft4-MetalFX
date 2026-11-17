@@ -546,6 +546,7 @@ static BOOL Theft4InstallSaveExport(NSURL *selected, NSURL *support, NSURL *docu
     UIDocumentPickerViewController *_saveImportPicker;
     // Theft4-MetalFX: game ZIP download / import.
     UIDocumentPickerViewController *_gameZipPicker;
+    UIDocumentPickerViewController *_gameFolderPicker;
     Theft4GameDownload *_gameDownload;
     BOOL _gameTransferBusy;
     BOOL _saveTransferBusy;
@@ -1390,9 +1391,9 @@ static void bootEvent(void *context, const char *event) {
         NSString *title = _baseGameCheckAttempted ? @"GAME FILES NOT FOUND"
                                                    : @"QUIT APP & LOAD GAME FILES";
         NSString *detail = _baseGameCheckAttempted
-            ? [NSString stringWithFormat:@"No default.xex was found in:\n\n%@\n\nCopy the extracted game contents there, or tap LOAD GAME FILES to download or pick a ZIP.",
+            ? [NSString stringWithFormat:@"No default.xex was found in:\n\n%@\n\nCopy the extracted game contents there, or tap LOAD GAME FILES to download a ZIP, pick a ZIP, or pick your game folder.",
                 Theft4FilesGamePath()]
-            : [NSString stringWithFormat:@"In Files, copy the contents of your legally obtained, extracted Xbox 360 GTA IV game into:\n\n%@\n\nThe folder must contain default.xex directly. Do not copy a raw ISO. When the transfer finishes, reopen %@.\n\nOr tap LOAD GAME FILES to download a ZIP from a direct link or pick one from Files. It extracts automatically.",
+            : [NSString stringWithFormat:@"In Files, copy the contents of your legally obtained, extracted Xbox 360 GTA IV game into:\n\n%@\n\nThe folder must contain default.xex directly. Do not copy a raw ISO. When the transfer finishes, reopen %@.\n\nOr tap LOAD GAME FILES to download a ZIP from a link, pick a ZIP from Files (extracted automatically), or pick your game folder from Files (moved in automatically).",
                 Theft4FilesGamePath(), Theft4DisplayName()];
         [self showInstallationTitle:title detail:detail
                         actionTitle:@"LOAD GAME FILES" spinner:NO
@@ -1734,12 +1735,14 @@ static void bootEvent(void *context, const char *event) {
         fileExistsAtPath:[[_gameURL URLByAppendingPathComponent:@"default.xex"] path]];
     if (hasBase) { [self checkBaseGame]; return; }
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"LOAD GAME FILES"
-        message:@"Use your own extracted Xbox 360 GTA IV game. A ZIP is extracted into the game folder automatically, then the ZIP is deleted. You need free space for the ZIP and the extracted game at the same time."
+        message:@"Use your own extracted Xbox 360 GTA IV game. Download a ZIP from a link, pick a ZIP from Files, or pick your extracted game folder from Files. ZIPs are extracted into the game folder and then deleted (you need space for both at once). A picked folder is moved in."
         preferredStyle:UIAlertControllerStyleAlert];
     [sheet addAction:[UIAlertAction actionWithTitle:@"DOWNLOAD ZIP FROM LINK"
         style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { [self promptGameDownloadLink]; }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"SELECT ZIP FROM FILES"
         style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { [self chooseGameZip]; }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"SELECT GAME FOLDER FROM FILES"
+        style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { [self chooseGameFolder]; }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"CHECK FOR GAME FILES"
         style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { [self checkBaseGame]; }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"CANCEL"
@@ -1831,6 +1834,45 @@ static void bootEvent(void *context, const char *event) {
     [self presentViewController:_gameZipPicker animated:YES completion:nil];
 }
 
+- (void)chooseGameFolder {
+    if (_gameTransferBusy) return;
+    _gameFolderPicker = [[UIDocumentPickerViewController alloc]
+        initForOpeningContentTypes:@[UTTypeFolder] asCopy:NO];
+    _gameFolderPicker.delegate = self;
+    _gameFolderPicker.allowsMultipleSelection = NO;
+    [self presentViewController:_gameFolderPicker animated:YES completion:nil];
+}
+
+- (void)moveGameFolder:(NSURL *)folder scoped:(BOOL)scoped {
+    _gameTransferBusy = YES;
+    UIApplication.sharedApplication.idleTimerDisabled = YES;
+    [self showInstallationTitle:@"MOVING GAME FILES"
+                         detail:@"0%\n\nKeep Theft4 open. Files on this iPhone move instantly; iCloud or USB files are copied."
+                    actionTitle:@"" spinner:YES step:Theft4InstallationStepCheckingBaseGame];
+    NSString *destination = _gameURL.path;
+    __weak __typeof__(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *error = nil;
+        BOOL ok = Theft4MoveFolderContents(folder.path, destination, ^(double fraction) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                __typeof__(self) strongSelf = weakSelf;
+                if (!strongSelf) return;
+                strongSelf->_installationDetail.text = [NSString stringWithFormat:
+                    @"%d%%\n\nKeep Theft4 open. Files on this iPhone move instantly; iCloud or USB files are copied.",
+                    (int)(fraction * 100.0)];
+            });
+        }, &error);
+        if (ok && !Theft4FlattenGameFolder(destination)) {
+            ok = NO;
+            error = @"No default.xex was found in that folder. Pick the extracted GTA IV game folder.";
+        }
+        if (scoped) [folder stopAccessingSecurityScopedResource];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf finishGameTransfer:ok ? nil : (error ?: @"Moving the game files failed.")];
+        });
+    });
+}
+
 - (void)extractGameZip:(NSString *)zip scopedURL:(NSURL *)scopedURL {
     _gameTransferBusy = YES;
     UIApplication.sharedApplication.idleTimerDisabled = YES;
@@ -1894,6 +1936,14 @@ static void bootEvent(void *context, const char *event) {
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller
 didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    if (controller == _gameFolderPicker) {
+        _gameFolderPicker = nil;
+        NSURL *selected = urls.firstObject;
+        if (!selected) return;
+        BOOL scoped = [selected startAccessingSecurityScopedResource];
+        [self moveGameFolder:selected scoped:scoped];
+        return;
+    }
     if (controller == _gameZipPicker) {
         _gameZipPicker = nil;
         NSURL *selected = urls.firstObject;
@@ -2039,6 +2089,10 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 }
 
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
+    if (controller == _gameFolderPicker) {
+        _gameFolderPicker = nil;
+        return;
+    }
     if (controller == _gameZipPicker) {
         _gameZipPicker = nil;
         return;
