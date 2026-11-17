@@ -96,8 +96,11 @@ jobs:
             --target metal_shader_export metal_host_shader_export
           out/direct-metal/build/metal_shader_export out/direct-metal/corpus
           out/direct-metal/build/metal_host_shader_export out/direct-metal/host-corpus
-          python3 tools/direct-metal/compile_shaders.py out/direct-metal/corpus out/direct-metal/ios --platform ios
-          python3 tools/direct-metal/compile_shaders.py out/direct-metal/host-corpus out/direct-metal/ios/Host --platform ios
+          xcodebuild -showComponent MetalToolchain -json || true
+          metal_bin="$(xcrun -sdk iphoneos -f metal)"; echo "metal: $metal_bin"
+          metal_dir="$(dirname "$metal_bin")"
+          python3 tools/direct-metal/compile_shaders.py --compiler-directory "$metal_dir" out/direct-metal/corpus out/direct-metal/ios --platform ios
+          python3 tools/direct-metal/compile_shaders.py --compiler-directory "$metal_dir" out/direct-metal/host-corpus out/direct-metal/ios/Host --platform ios
           echo "THEFT4_METAL_LIBRARIES=$PWD/out/direct-metal/ios" >> "$GITHUB_ENV"
           echo "THEFT4_METAL_HOST_LIBRARIES=$PWD/out/direct-metal/ios/Host" >> "$GITHUB_ENV"
           rm -rf out/direct-metal/build
