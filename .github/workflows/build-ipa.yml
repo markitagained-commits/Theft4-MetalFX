@@ -1,0 +1,131 @@
+name: Build Theft4 MetalFX IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-ipa
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 360
+    env:
+      THEFT4_TAG: v0.3.2
+      XENIOS_BRANCH: xenios
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes || true
+          xcrun simctl delete all || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator || true
+          sudo rm -rf ~/Library/Android /usr/local/share/dotnet /usr/local/lib/node_modules || true
+          for x in /Applications/Xcode_*.app; do echo "$x"; done
+          df -h /
+
+      - name: Select Xcode
+        run: |
+          xcode="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | grep -v -i beta | sort -V | tail -n 1 || true)"
+          [ -z "$xcode" ] && xcode="$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)"
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+          sudo xcodebuild -downloadComponent MetalToolchain || true
+          xcrun -sdk iphoneos --show-sdk-version
+          for x in /Applications/Xcode_*.app; do [ "$x" != "$xcode" ] && sudo rm -rf "$x" || true; done
+          df -h /
+          brew install ninja || true
+          cmake --version
+
+      - name: Fetch Theft4 ${{ env.THEFT4_TAG }} source
+        run: |
+          git clone --depth 1 --branch "$THEFT4_TAG" https://github.com/KoreanSeats1/Theft4.git "$RUNNER_TEMP/Theft4"
+          cd "$RUNNER_TEMP/Theft4"
+          python3 tools/setup_repo.py
+          rm -rf tools/ghidra_11.2.1_PUBLIC tools/ghidra_projects || true
+          df -h /
+
+      - name: Apply MetalFX overlay
+        run: |
+          cp -R overlay/. "$RUNNER_TEMP/Theft4/"
+          cd "$RUNNER_TEMP/Theft4"
+          git status --short
+
+      - name: Build iPhoneOS MoltenVK / SPIR-V archives
+        run: |
+          git clone --depth 1 --branch "$XENIOS_BRANCH" https://github.com/xenios-jp/XeniOS.git "$RUNNER_TEMP/XeniOS"
+          cd "$RUNNER_TEMP/XeniOS"
+          git submodule update --init --depth 1 third_party/MoltenVK third_party/SPIRV-Cross \
+            third_party/SPIRV-Tools third_party/SPIRV-Headers third_party/Vulkan-Headers third_party/cereal
+          cmake -S "$GITHUB_WORKSPACE/ci/moltenvk-ios" -B "$RUNNER_TEMP/mvk-build" -G Ninja \
+            -DTP="$RUNNER_TEMP/XeniOS/third_party" \
+            -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0 -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/mvk-build" --target theft4_libs --parallel "$(sysctl -n hw.ncpu)"
+          libdir="$RUNNER_TEMP/ios-libs"; mkdir -p "$libdir"
+          b="$RUNNER_TEMP/mvk-build"
+          cp "$(find "$b" -name libMoltenVK.a | head -1)" "$libdir/libMoltenVK.a"
+          cp "$(find "$b" -name libMoltenVK_Common.a | head -1)" "$libdir/libMoltenVK_Common.a"
+          cp "$(find "$b" -name libMoltenVK_ShaderConverter.a | head -1)" "$libdir/libMoltenVK_ShaderConverter.a"
+          cp "$(find "$b" -name libspirv-cross.a | head -1)" "$libdir/libspirv-cross.a"
+          spvt="$(find "$b" -name 'libSPIRV-Tools.a' | head -1)"
+          [ -z "$spvt" ] && spvt="$(find "$b" -name 'libSPIRV-Tools-static.a' | head -1)"
+          cp "$spvt" "$libdir/libSPIRV-Tools.a"
+          ls -la "$libdir"
+          for f in "$libdir"/*.a; do lipo -info "$f"; done
+          echo "THEFT4_MOLTENVK_IOS_LIB_DIR=$libdir" >> "$GITHUB_ENV"
+          rm -rf "$RUNNER_TEMP/mvk-build"
+
+      - name: Compile offline iPhoneOS Metal shaders
+        run: |
+          cd "$RUNNER_TEMP/Theft4"
+          cmake -S tools/direct-metal -B out/direct-metal/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build out/direct-metal/build --parallel "$(sysctl -n hw.ncpu)" \
+            --target metal_shader_export metal_host_shader_export
+          out/direct-metal/build/metal_shader_export out/direct-metal/corpus
+          out/direct-metal/build/metal_host_shader_export out/direct-metal/host-corpus
+          python3 tools/direct-metal/compile_shaders.py out/direct-metal/corpus out/direct-metal/ios --platform ios
+          python3 tools/direct-metal/compile_shaders.py out/direct-metal/host-corpus out/direct-metal/ios/Host --platform ios
+          echo "THEFT4_METAL_LIBRARIES=$PWD/out/direct-metal/ios" >> "$GITHUB_ENV"
+          echo "THEFT4_METAL_HOST_LIBRARIES=$PWD/out/direct-metal/ios/Host" >> "$GITHUB_ENV"
+          rm -rf out/direct-metal/build
+          df -h /
+
+      - name: Build unsigned IPA
+        run: |
+          # Configure-time check only: game files are never bundled; the user
+          # supplies their own lawful dump on device.
+          payload="$RUNNER_TEMP/empty_payload"; mkdir -p "$payload"
+          for f in default.xex common.rpf xbox360.rpf audio.rpf; do : > "$payload/$f"; done
+          export GAME_PATH="$payload"
+          export THEFT4_BUILD_JOBS="$(sysctl -n hw.ncpu)"
+          export THEFT4_XENIOS_GENERATED_SHADER_DIR="$RUNNER_TEMP/none"
+          cd "$RUNNER_TEMP/Theft4"
+          zsh tools/build_ios_release.sh 0.3.2
+          ls -la dist
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          for f in dist/*.ipa; do cp "$f" "$GITHUB_WORKSPACE/out/Theft4-MetalFX-0.3.2.ipa"; done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Theft4-MetalFX-ipa
+          path: out/*.ipa
+          if-no-files-found: ignore
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="build-${{ github.run_number }}"
+          gh release create "$tag" out/Theft4-MetalFX-0.3.2.ipa \
+            --repo "${{ github.repository }}" --title "Theft4 MetalFX (0.3.2) build ${{ github.run_number }}" \
+            --notes "Unsigned IPA. Sideload with AltStore or Sideloadly. Pick the MetalFX upscaler in the launcher (Off, UQ 1.3x, Quality 1.5x, Balanced 1.7x, Performance 2x, Ultra Performance 3x). Default: Performance. Bring your own legally dumped game files." --latest
