@@ -513,6 +513,7 @@ static BOOL Theft4InstallSaveExport(NSURL *selected, NSURL *support, NSURL *docu
     NSInteger _benchMaxThermal, _benchStartThermal;
     NSUInteger _benchPressureStart;
     CFTimeInterval _benchStartTime;
+    CFTimeInterval _benchSessionSeconds;  // capture time before the run started (warm-up)
     NSMutableData *_perfRealMs;
     uint64_t _perfLastRealNs;
     NSTimer *_fpsTimer;
@@ -3676,6 +3677,96 @@ static NSData *Theft4Slice(NSData *data, NSUInteger offsetCount) {
     if (offsetCount >= count) return [NSData data];
     return [data subdataWithRange:NSMakeRange(offsetCount * sizeof(double), (count - offsetCount) * sizeof(double))];
 }
+// FPS over the slowest 1% of frame times (mean of the worst 1%, at least one
+// frame). 0 when there are no samples.
+static double Theft4OnePercentLowFPS(NSData *frameTimesMs) {
+    const NSUInteger n = frameTimesMs.length / sizeof(double);
+    if (!n) return 0;
+    double *copy = malloc(n * sizeof(double));
+    if (!copy) return 0;
+    memcpy(copy, frameTimesMs.bytes, n * sizeof(double));
+    qsort_b(copy, n, sizeof(double), ^int(const void *a, const void *b) {
+        const double x = *(const double *)a, y = *(const double *)b; return x > y ? -1 : x < y; });
+    const NSUInteger worst = MAX((NSUInteger)1, n / 100);
+    double sum = 0;
+    for (NSUInteger i = 0; i < worst; ++i) sum += copy[i];
+    free(copy);
+    return sum > 0 ? 1000.0 * (double)worst / sum : 0;
+}
+
+// Benchmark recommendation inputs: measured values plus the saved settings
+// the recommendation steps from. Pure logic, no state.
+typedef struct {
+    double p50, p95, gpu50, wait50, drawable50;
+    NSInteger thermalStart, thermalMax;
+    BOOL enoughData, frameGeneration;
+    NSInteger traffic, peds, metalfxMode, metalfxOutput, renderHeight;
+} Theft4BenchmarkInputs;
+
+static NSInteger Theft4DensityStepDown(NSInteger percent);
+
+// Returns verdict, bound, recommended profile, reasons and confidence.
+static NSDictionary *Theft4BenchmarkRecommendation(Theft4BenchmarkInputs in) {
+    // Target: steady 30 FPS presented. Without frame generation that is 30
+    // real FPS (33.3 ms); with it the presented cap paces real frames to
+    // ~15 FPS by design, so real-frame thresholds double.
+    const double scale = in.frameGeneration ? 2.0 : 1.0;
+    NSString *verdict = @"stable";
+    NSString *bound = @"none";
+    NSInteger newTraffic = in.traffic, newPeds = in.peds, newMode = in.metalfxMode,
+        newOutput = in.metalfxOutput, newHeight = in.renderHeight;
+    NSMutableArray<NSString *> *reasons = [NSMutableArray new];
+    const NSInteger thermal = in.thermalMax;
+    const BOOL slow = in.p50 > 35.0 * scale || in.p95 > 40.0 * scale;
+    if (!in.enoughData) {
+        verdict = @"insufficient-data";
+        [reasons addObject:@"Fewer than 300 real frames were measured; stay in gameplay for the full 60 s."];
+    } else if (slow || thermal >= 2) {
+        verdict = @"change";
+        // GPU-bound: command buffers take most of the frame, or the CPU
+        // waits for frame slots / drawables. Otherwise the CPU/simulation.
+        // With frame generation the drawable wait is the presented-frame
+        // pacing itself, so it is not a GPU signal.
+        const BOOL gpuBound = in.gpu50 >= 0.8 * in.p50 || in.wait50 > 2.0 ||
+            (!in.frameGeneration && in.drawable50 > 4.0);
+        bound = gpuBound ? @"gpu" : @"cpu";
+        if (gpuBound) {
+            if (in.metalfxMode <= 0) { newMode = 3; [reasons addObject:@"GPU-bound: turn on MetalFX Performance (2x)."]; }
+            else if (in.metalfxMode < 4) { newMode = in.metalfxMode + 1; [reasons addObject:@"GPU-bound: one MetalFX step faster."]; }
+            else if (in.renderHeight > 540) { newHeight = 540; [reasons addObject:@"GPU-bound at Ultra Performance: lower Internal Resolution to 540p."]; }
+            if (newMode > 0 && (in.metalfxOutput == 0 || in.metalfxOutput > 720) && in.renderHeight <= 720) {
+                newOutput = 0; // Match keeps 720p output at 720p
+            }
+        } else {
+            newTraffic = Theft4DensityStepDown(in.traffic); newPeds = Theft4DensityStepDown(in.peds);
+            [reasons addObject:[NSString stringWithFormat:@"CPU-bound (GPU %.1f ms of a %.1f ms frame): lower traffic %ld%%→%ld%% and pedestrians %ld%%→%ld%%.",
+                in.gpu50, in.p50, (long)in.traffic, (long)newTraffic, (long)in.peds, (long)newPeds]];
+        }
+        if (thermal >= 2) {
+            [reasons addObject:@"Thermal state reached Serious or Critical: the next step down is applied to keep frame times stable, and Lock to 30 FPS is recommended."];
+            if (gpuBound && newMode > 0 && newMode < 4 && newMode == in.metalfxMode) newMode = in.metalfxMode + 1;
+            if (!gpuBound && newTraffic == Theft4DensityStepDown(in.traffic)) { newTraffic = Theft4DensityStepDown(newTraffic); newPeds = Theft4DensityStepDown(newPeds); }
+        }
+        if (newTraffic == in.traffic && newPeds == in.peds && newMode == in.metalfxMode &&
+            newOutput == in.metalfxOutput && newHeight == in.renderHeight)
+            [reasons addObject:@"Already at the lowest setting for this bottleneck; no further step is available."];
+    } else {
+        [reasons addObject:in.frameGeneration
+            ? @"Real frame times are within target for frame generation (p50 ≤ 70 ms, p95 ≤ 80 ms) and thermal is Nominal or Fair: keep this profile."
+            : @"Frame times are within target (p50 ≤ 35 ms, p95 ≤ 40 ms) and thermal is Nominal or Fair: keep this profile."];
+    }
+    // A 60 s run cannot show sustained throttling. Lower confidence when the
+    // device warmed up during the run or started already warm.
+    NSString *confidence = @"medium";
+    if (!in.enoughData || in.thermalMax > in.thermalStart || in.thermalStart >= 1) confidence = @"low";
+    [reasons addObject:@"Short 60 s run: sustained heat can lower performance later; confirm with a 10-minute session before relying on it."];
+    if (in.thermalMax > in.thermalStart)
+        [reasons addObject:@"Thermal state rose during the run; expect lower sustained performance."];
+    return @{@"verdict": verdict, @"bound": bound, @"reasons": reasons, @"confidence": confidence,
+             @"recommended": @{@"traffic_percent": @(newTraffic), @"ped_percent": @(newPeds),
+                               @"metalfx_mode": @(newMode), @"metalfx_output": @(newOutput), @"render_height": @(newHeight)}};
+}
+
 static NSInteger Theft4StoredDensityPercent(NSString *percentKey, NSString *legacyKey) {
     NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
     if ([d objectForKey:percentKey]) return [d integerForKey:percentKey];
@@ -3703,7 +3794,9 @@ static NSInteger Theft4DensityStepDown(NSInteger percent) {
     _benchRunning = YES;
     const uint64_t rendered = theft4_perf_rendered_total(), generated = theft4_perf_generated_total();
     const CFTimeInterval now = CACurrentMediaTime();
+    const CFTimeInterval sessionSeconds = MAX(0.0, now - _publicationCaptureStartTime);
     dispatch_async(_publicationCaptureQueue, ^{
+        self->_benchSessionSeconds = sessionSeconds;
         [self collectPerfStats];
         self->_benchOffReal = self->_perfRealMs.length / sizeof(double);
         self->_benchOffPresented = self->_perfPresentedMs.length / sizeof(double);
@@ -3742,6 +3835,7 @@ static NSInteger Theft4DensityStepDown(NSInteger percent) {
     const NSInteger metalfxOutput = [defaults integerForKey:@"Theft4MetalFXOutput"];
     const NSInteger renderHeight = [defaults integerForKey:@"Theft4LabRenderHeight"] ?: 720;
     const theft4_output_policy output = theft4_metal_get_output_policy();
+    const NSInteger thermalEnd = NSProcessInfo.processInfo.thermalState;
     dispatch_async(_publicationCaptureQueue, ^{
         [self collectPerfStats];
         self->_benchActive = NO;
@@ -3761,60 +3855,51 @@ static NSInteger Theft4DensityStepDown(NSInteger percent) {
             drawable50 = Theft4Percentile(drawable, 0.5), prepare50 = Theft4Percentile(prepare, 0.5);
         const NSInteger thermal = self->_benchMaxThermal;
         const NSUInteger pressure = self->_memoryPressureWarnings + self->_memoryPressureCriticals - self->_benchPressureStart;
+        const uint64_t renderedFrames = rendered - self->_benchRenderedStart;
+        const uint64_t generatedFrames = generated - self->_benchGeneratedStart;
+        const BOOL frameGeneration = generatedFPS >= 1.0;
 
-        // Recommendation, from measured frame times only. Target: steady 30 FPS
-        // (33.3 ms) with p95 under 40 ms and thermal at most Fair.
-        NSString *verdict = @"stable";
-        NSString *bound = @"none";
-        NSInteger newTraffic = traffic, newPeds = peds, newMode = metalfxMode, newOutput = metalfxOutput,
-            newHeight = renderHeight;
-        NSMutableArray<NSString *> *reasons = [NSMutableArray new];
-        const BOOL enoughData = [realDist[@"samples"] unsignedIntegerValue] >= 300;
-        const BOOL slow = p50 > 35.0 || p95 > 40.0;
-        if (!enoughData) {
-            verdict = @"insufficient-data";
-            [reasons addObject:@"Fewer than 300 real frames were measured; stay in gameplay for the full 60 s."];
-        } else if (slow || thermal >= 2) {
-            verdict = @"change";
-            // GPU-bound: command buffers take most of the frame, or the CPU
-            // waits for frame slots / drawables. Otherwise the CPU/simulation.
-            const BOOL gpuBound = gpu50 >= 0.8 * p50 || wait50 > 2.0 || drawable50 > 4.0;
-            bound = gpuBound ? @"gpu" : @"cpu";
-            if (gpuBound) {
-                if (metalfxMode <= 0) { newMode = 3; [reasons addObject:@"GPU-bound: turn on MetalFX Performance (2x)."]; }
-                else if (metalfxMode < 4) { newMode = metalfxMode + 1; [reasons addObject:@"GPU-bound: one MetalFX step faster."]; }
-                else if (renderHeight > 540) { newHeight = 540; [reasons addObject:@"GPU-bound at Ultra Performance: lower Internal Resolution to 540p."]; }
-                if (newMode > 0 && (metalfxOutput == 0 || metalfxOutput > 720) && renderHeight <= 720) {
-                    newOutput = 0; // Match keeps 720p output at 720p
-                }
-            } else {
-                newTraffic = Theft4DensityStepDown(traffic); newPeds = Theft4DensityStepDown(peds);
-                [reasons addObject:[NSString stringWithFormat:@"CPU-bound (GPU %.1f ms of a %.1f ms frame): lower traffic %ld%%→%ld%% and pedestrians %ld%%→%ld%%.",
-                    gpu50, p50, (long)traffic, (long)newTraffic, (long)peds, (long)newPeds]];
-            }
-            if (thermal >= 2) {
-                [reasons addObject:@"Thermal state reached Serious or Critical: the next step down is applied to keep frame times stable, and Lock to 30 FPS is recommended."];
-                if (gpuBound && newMode > 0 && newMode < 4 && newMode == metalfxMode) newMode = metalfxMode + 1;
-                if (!gpuBound && newTraffic == Theft4DensityStepDown(traffic)) { newTraffic = Theft4DensityStepDown(newTraffic); newPeds = Theft4DensityStepDown(newPeds); }
-            }
-        } else {
-            [reasons addObject:@"Frame times are within target (p50 ≤ 35 ms, p95 ≤ 40 ms) and thermal is Nominal or Fair: keep this profile."];
-        }
-        NSDictionary *recommended = @{@"traffic_percent": @(newTraffic), @"ped_percent": @(newPeds),
-            @"metalfx_mode": @(newMode), @"metalfx_output": @(newOutput), @"render_height": @(newHeight)};
+        Theft4BenchmarkInputs inputs = {0};
+        inputs.p50 = p50; inputs.p95 = p95; inputs.gpu50 = gpu50; inputs.wait50 = wait50; inputs.drawable50 = drawable50;
+        inputs.thermalStart = self->_benchStartThermal; inputs.thermalMax = thermal;
+        inputs.enoughData = [realDist[@"samples"] unsignedIntegerValue] >= 300;
+        inputs.frameGeneration = frameGeneration;
+        inputs.traffic = traffic; inputs.peds = peds; inputs.metalfxMode = metalfxMode;
+        inputs.metalfxOutput = metalfxOutput; inputs.renderHeight = renderHeight;
+        NSDictionary *recommendation = Theft4BenchmarkRecommendation(inputs);
+        NSString *verdict = recommendation[@"verdict"];
+        NSString *bound = recommendation[@"bound"];
+        NSArray<NSString *> *reasons = recommendation[@"reasons"];
+        NSDictionary *recommended = recommendation[@"recommended"];
+        const NSInteger newTraffic = [recommended[@"traffic_percent"] integerValue];
+        const NSInteger newPeds = [recommended[@"ped_percent"] integerValue];
+        const NSInteger newMode = [recommended[@"metalfx_mode"] integerValue];
+        const NSInteger newOutput = [recommended[@"metalfx_output"] integerValue];
+        const NSInteger newHeight = [recommended[@"render_height"] integerValue];
         NSDictionary *result = @{
             @"schema": @"theft4-metalfx-benchmark/1",
             @"build": NSBundle.mainBundle.infoDictionary[@"CFBundleVersion"] ?: @"",
             @"duration_seconds": @(seconds),
             @"rendered_fps": @(renderedFPS), @"generated_fps": @(generatedFPS),
             @"presented_fps": @(renderedFPS + generatedFPS),
+            @"average_fps": @{@"real": @(renderedFPS), @"presented": @(renderedFPS + generatedFPS)},
+            @"one_percent_low_fps": @{@"real": @(Theft4OnePercentLowFPS(real)),
+                                      @"presented": @(Theft4OnePercentLowFPS(presented))},
+            @"frames": @{@"rendered": @(renderedFrames), @"generated": @(generatedFrames),
+                         @"presented": @(renderedFrames + generatedFrames)},
+            @"frame_generation_active": @(frameGeneration),
+            @"run": @{@"kind": @"short-60s",
+                      @"start": (self->_benchStartThermal == 0 && self->_benchSessionSeconds < 120.0) ? @"cold" : @"warm",
+                      @"session_seconds_before_start": @(self->_benchSessionSeconds),
+                      @"note": @"cold = thermal Nominal and under 2 minutes into the capture at start; a 60 s run does not show sustained throttling"},
+            @"confidence": recommendation[@"confidence"],
             @"real_frame_time": realDist,
             @"presented_frame_time": Theft4Distribution(presented),
             @"gpu_command_buffer": Theft4Distribution(gpu),
             @"cpu_prepare": Theft4Distribution(prepare),
             @"frame_slot_wait": Theft4Distribution(wait),
             @"drawable_wait": Theft4Distribution(drawable),
-            @"thermal": @{@"start": @(self->_benchStartThermal), @"max": @(thermal)},
+            @"thermal": @{@"start": @(self->_benchStartThermal), @"max": @(thermal), @"end": @(thermalEnd)},
             @"memory": @{@"peak_footprint_bytes": @(self->_benchPeakFootprint),
                          @"min_available_bytes": @(self->_benchMinAvailable == UINT64_MAX ? 0 : self->_benchMinAvailable),
                          @"pressure_events": @(pressure)},
