@@ -602,6 +602,7 @@ static BOOL Theft4InstallSaveExport(NSURL *selected, NSURL *support, NSURL *docu
     Theft4InstallationStep _installationStep;
     BOOL _baseGameChecked;
     BOOL _baseGameCheckAttempted;
+    BOOL _passiveGameFileCheck; // launch/foreground reconcile: never show setup screens
     BOOL _setupValidated;
 #ifdef THEFT4_BC_TEXTURE_COMPATIBILITY
     Theft4TexturePreparation *_texturePreparation;
@@ -1248,6 +1249,15 @@ static void bootEvent(void *context, const char *event) {
         Theft4DeviceNeedsBCTexturePreparation() &&
         ![NSUserDefaults.standardUserDefaults boolForKey:Theft4TextureSourcesReviewedDefaultsKey()]) {
 #endif
+        if (_passiveGameFileCheck) {
+            // No pop-ups on launch/foreground: texture setup opens only when
+            // the user taps Play or VERIFY GAME FILES.
+            _installationOverlay.hidden = YES;
+            [_installationSpinner stopAnimating];
+            _bootStatus = @"Game files verified. Textures need a one-time setup - tap Play or VERIFY GAME FILES (System).";
+            [self refresh];
+            return YES;
+        }
 #ifdef THEFT4_BC_TEXTURE_COMPATIBILITY
         NSString *capability = Theft4DeviceNeedsBCTexturePreparation()
             ? @"Your GPU cannot read the game's BC-compressed textures directly. Theft4 prepares ASTC copies that your GPU can read. Keeping them compressed reduces GPU memory use, and preparing before Play moves this conversion work out of gameplay."
@@ -1459,7 +1469,10 @@ static void bootEvent(void *context, const char *event) {
     if (_failure || !_gameURL || _loading || _executionAttempted ||
         _installationStep == Theft4InstallationStepCheckingBaseGame ||
         _installationStep == Theft4InstallationStepInstallingUpdate) return;
-    if ([self completeSetupForInstalledGame]) return;
+    _passiveGameFileCheck = YES;
+    const BOOL installed = [self completeSetupForInstalledGame];
+    _passiveGameFileCheck = NO;
+    if (installed) return;
     _installationOverlay.hidden = YES;
     [_installationSpinner stopAnimating];
     _installationStep = Theft4InstallationStepCopyBaseGame;
