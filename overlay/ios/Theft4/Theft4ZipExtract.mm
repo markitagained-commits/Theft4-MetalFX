@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <set>
 
 namespace {
 
@@ -41,6 +42,9 @@ bool readAt(FILE *f, uint64_t offset, void *buffer, size_t size) {
 bool safeName(const std::string &name) {
     if (name.empty() || name[0] == '/' || name[0] == '\\') return false;
     if (name.find('\\') != std::string::npos) return false;
+    // An embedded NUL would make the path written (c_str) differ from the
+    // name validated here.
+    if (name.find('\0') != std::string::npos) return false;
     size_t start = 0;
     while (start <= name.size()) {
         size_t end = name.find('/', start);
@@ -112,6 +116,7 @@ BOOL Theft4ExtractZip(NSString *zipPath, NSString *destination,
     if (entryCount > cdSize / 46) { fail(error, @"The ZIP directory is damaged."); return NO; }
     entries.reserve((size_t)entryCount);
     uint64_t totalBytes = 0;
+    std::set<std::string> names;  // duplicate entries would silently overwrite each other
     size_t p = 0;
     for (uint64_t i = 0; i < entryCount; ++i) {
         if (p + 46 > cd.size() || rd32(&cd[p]) != 0x02014b50) { fail(error, @"The ZIP directory is damaged."); return NO; }
@@ -150,12 +155,27 @@ BOOL Theft4ExtractZip(NSString *zipPath, NSString *destination,
         // Skip macOS metadata.
         if (en.name.rfind("__MACOSX/", 0) == 0 || en.name.find("/._") != std::string::npos ||
             en.name.rfind("._", 0) == 0 || en.name.find(".DS_Store") != std::string::npos) continue;
+        if (!names.insert(en.name).second) {
+            fail(error, @"The ZIP lists the same file twice. It may be damaged; download it again."); return NO;
+        }
         totalBytes += en.uncompressed;
         entries.push_back(std::move(en));
     }
 
     NSFileManager *fm = NSFileManager.defaultManager;
     [fm createDirectoryAtPath:destination withIntermediateDirectories:YES attributes:nil error:nil];
+    // Fail up front instead of after writing most of the game when the
+    // extracted size cannot fit (the archive itself is deleted only afterwards).
+    id capacity = nil;
+    [[NSURL fileURLWithPath:destination] getResourceValue:&capacity
+        forKey:NSURLVolumeAvailableCapacityForImportantUsageKey error:nil];
+    NSNumber *available = [capacity isKindOfClass:NSNumber.class] ? (NSNumber *)capacity : nil;
+    if (available && available.longLongValue >= 0 && totalBytes > (uint64_t)available.longLongValue) {
+        fail(error, [NSString stringWithFormat:@"Not enough free storage: the game needs %@ and %@ is available.",
+            [NSByteCountFormatter stringFromByteCount:(long long)totalBytes countStyle:NSByteCountFormatterCountStyleFile],
+            [NSByteCountFormatter stringFromByteCount:available.longLongValue countStyle:NSByteCountFormatterCountStyleFile]]);
+        return NO;
+    }
     const std::string root = destination.fileSystemRepresentation;
     std::vector<uint8_t> in(1 << 20), out(1 << 20);
     uint64_t doneBytes = 0;
@@ -240,6 +260,7 @@ BOOL Theft4ExtractZip(NSString *zipPath, NSString *destination,
             return NO;
         }
         if ((uint32_t)crc != en.crc) {
+            [fm removeItemAtPath:target error:nil];
             fail(error, [NSString stringWithFormat:@"%s failed its checksum. Download it again.", en.name.c_str()]);
             return NO;
         }
