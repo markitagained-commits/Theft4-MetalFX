@@ -1,13 +1,21 @@
 name: Build Theft4 MetalFX IPA
 
+# Manual runs only. Pushes never build or publish; a release is created only
+# when a run is dispatched with publish=true (compile checks leave it false).
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       runner:
         description: Runner label
         default: macos-26
+        required: false
+      publish:
+        description: Publish the IPA as a GitHub release (false = compile check only)
+        type: boolean
+        default: false
+      release_tag:
+        description: Release tag when publishing (default build-<run number>)
+        default: ''
         required: false
 
 permissions:
@@ -72,7 +80,13 @@ jobs:
           path: ${{ runner.temp }}/Theft4
           key: theft4-src-${{ env.THEFT4_TAG }}-v1
 
-      - name: Apply MetalFX overlay
+      - name: Compile-check runtime Metal shaders (MSL in overlay sources)
+        run: |
+          # The overlay compiles several small MSL programs at runtime
+          # (newLibraryWithSource). Compile each one here so a shader error
+          # fails CI instead of silently disabling a feature on device.
+          xcodebuild -downloadComponent MetalToolchain >/dev/null 2>&1 || true
+          python3 ci/check_runtime_msl.py overlay
         run: |
           cp -R overlay/. "$RUNNER_TEMP/Theft4/"
           python3 ci/patches/apply_patches.py "$RUNNER_TEMP/Theft4"
@@ -209,10 +223,11 @@ jobs:
           if-no-files-found: ignore
 
       - name: Publish release
+        if: ${{ inputs.publish }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="build-${{ github.run_number }}"
+          tag="${{ inputs.release_tag }}"; [ -z "$tag" ] && tag="build-${{ github.run_number }}"
           gh release create "$tag" out/Theft4-MetalFX-0.3.2.ipa \
-            --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "Theft4 MetalFX (0.3.2) build ${{ github.run_number }}" \
+            --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "Theft4 MetalFX (0.3.2) $tag" \
             --notes "Unsigned IPA. Sideload with AltStore or Sideloadly. Turn on METALFX UPSCALING in the launcher's Graphics settings and pick a mode (Native, Quality 1.5x, Performance 2x, Ultra Performance 3x). It is Off by default. On first launch the app opens LOAD GAME FILES so you can download or pick a ZIP or Xbox 360 ISO (use a direct https link). Bring your own legally dumped game files." --latest
