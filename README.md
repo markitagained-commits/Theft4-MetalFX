@@ -31,13 +31,13 @@ Launcher → Graphics → turn on **METALFX UPSCALING**, then pick a **METALFX M
 ### Traffic and pedestrians
 Fewer cars and people means less work for the CPU, which is usually what holds phones back.
 
-Launcher → Graphics → **TRAFFIC DENSITY** and **PEDESTRIAN DENSITY**: 5%, 15%, 35%, 60% (default), 80%, 100%.
+Launcher → Graphics → **TRAFFIC DENSITY** and **PEDESTRIAN DENSITY**: 5%, 10%, 15%, 20%, 25%, 30%, 35%, 60% (default), 80%, 100%. Below 35% it steps down by 5 to a minimum of 5%. Older saved values snap to the nearest step.
 
 These scale GTA IV's own population multipliers (random cars, parked cars, ambient and scenario pedestrians), which the game's spawners read, so fewer cars and people are actually created and simulated, not just hidden. Missions that clear the streets still work (zero is left alone). Settings kick in next time you launch the game. Long Performance Capture records the multipliers actually written.
 
 ### MetalFX output, frame generation, enhancement
 - **METALFX OUTPUT** (in the MetalFX mode row): Match / 720p / 1080p / 1440p. Match follows Internal Resolution; 720p now stays 720p (older builds bumped it to 1080p).
-- **METALFX FRAME GENERATION** (Off by default, experimental): Apple MetalFX frame interpolation. Uses scene depth plus camera motion vectors made from the game's camera matrices. Cars and people only carry camera motion, so expect artifacts on them and on the HUD, and about half a frame of extra latency.
+- **METALFX FRAME GENERATION** (Off by default, experimental): Apple MetalFX frame interpolation. Uses scene depth plus camera motion vectors made from the game's camera matrices. Cars and people only carry camera motion, so expect artifacts on them and on the HUD, and about half a frame of extra latency. It's its own toggle and works with FSR, MetalFX upscaling, or neither. With it on, presented FPS stays capped at 30 (about 15 real + 15 generated), and generated frames show in the FPS counter and as a purple `+N FG/s` line on the frame-time graph.
 - **VISUAL ENHANCEMENT** (Off by default): light contrast-adaptive sharpening plus a mild color and contrast curve in one small pass.
 
 ### Performance capture
@@ -47,9 +47,13 @@ System → **LONG PERFORMANCE CAPTURE** now also writes `perf-frames-*.csv`, `pe
 - System → **PERFORMANCE OVERLAY** (Off by default): top-left box with **Rendered** (real game frames) and **Generated** (MetalFX frame generation) as per-second rates and totals since you turned it on, plus presented FPS and real frame time. Generated stays 0 when frame generation is off.
 - System → **BENCHMARK (60 S)** (off each launch): arms the capture. In game, three-finger tap → **Start 60 s Benchmark** at the same spot or route each time. You get rendered/generated FPS, frame-time p50/p95/p99, GPU and CPU time, waits, thermal and memory, a `benchmark-*.json` in the log capture, and a recommended traffic/pedestrian/MetalFX/resolution profile with **Apply for Next Launch**. Repeat until it says Stable.
 
+### Device defaults
+- 4 GB iPhones (iPhone 13 / 13 mini) use the limited-memory profile and default to 540p internal resolution.
+- iPhone 16e and iPhone 13 Pro keep their existing defaults. Frame generation is off by default on every device.
+
 ## Best settings for FPS
 - Frame Speed preset + MetalFX Performance + Traffic and Pedestrians on Low or Medium
-- Lock to 30 FPS for smoother frame pacing
+- The game is already capped at 30 FPS, which keeps frame pacing even
 - MetalFX helps when the graphics are the problem, lower density helps on busy streets and fast driving
 
 ## Install
