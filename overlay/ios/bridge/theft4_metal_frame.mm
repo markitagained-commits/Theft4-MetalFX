@@ -8,6 +8,7 @@
 #import <Foundation/Foundation.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <bit>
 #include <map>
@@ -568,20 +569,40 @@ template<bool Diagnostics> Receipt FrameAdapter::SubmitFrameImpl(const std::shar
     frame.ProfilePasses(mapping.size(),mapping);
   }
   // Theft4-MetalFX frame interpolation: pick the scene pass (most game draws
-  // with a single-sample depth attachment); its depth is kept and turned into
-  // interpolator depth + camera motion vectors right after the pass.
+  // with a 2D depth attachment, single-sampled or MSAA: EncodeMotion has a
+  // depth2d_ms variant); its depth is kept and turned into interpolator depth
+  // + camera motion vectors right after the pass. Depth whose aspect matches
+  // the output (the scene, also when MetalFX/FSR renders it smaller) wins over
+  // other depth targets (shadow maps), which are only used when nothing matches.
   size_t fi_pass=size_t(-1);
   if(fi::PresentedFrameMarked()&&plan->output) {
     const auto* out=render::FindSurface(*plan,plan->output->surface);
     if(out&&fi::Active(impl_->renderer.Device(),out->width,out->height)) {
-      size_t best=0,index=0;
+      size_t best=0,best_any=0,index=0,fallback=size_t(-1);
+      const render::Surface* chosen=nullptr;const render::Surface* chosen_any=nullptr;
+      const double out_aspect=double(out->width)/double(std::max(1u,out->height));
       for(const auto& command:plan->commands) {
         const auto here=index++;
         const auto* pass=std::get_if<render::Pass>(&command);if(!pass||!pass->depth)continue;
         const auto* depth_surface=render::FindSurface(*plan,pass->depth->view.surface);
-        if(!depth_surface||depth_surface->samples!=1||depth_surface->kind!=render::ImageKind::Texture2D)continue;
+        if(!depth_surface||depth_surface->kind!=render::ImageKind::Texture2D||!depth_surface->height)continue;
         size_t draws=0;for(const auto& c:pass->commands)if(std::holds_alternative<render::FrameDraw>(c))++draws;
-        if(draws>best){best=draws;fi_pass=here;}
+        if(!draws)continue;
+        const double aspect=double(depth_surface->width)/double(depth_surface->height);
+        if(std::fabs(aspect/out_aspect-1.0)<=0.05) {
+          if(draws>best){best=draws;fi_pass=here;chosen=depth_surface;}
+        } else if(draws>best_any){best_any=draws;fallback=here;chosen_any=depth_surface;}
+      }
+      if(fi_pass==size_t(-1)){fi_pass=fallback;chosen=chosen_any;best=best_any;}
+      // Log the choice when it changes (bounded): which depth feeds the interpolator.
+      static uint32_t logged=0;static uint64_t last_key=~uint64_t(0);
+      const uint64_t key=chosen?(uint64_t(chosen->width)<<32|uint64_t(chosen->height)<<8|chosen->samples):0;
+      if(key!=last_key&&logged<12) {
+        ++logged;last_key=key;
+        if(chosen)std::fprintf(stderr,"theft4-fi: scene pass %zu draws=%zu depth=%ux%u samples=%u aspect-match=%d output=%ux%u\n",
+            fi_pass,best,chosen->width,chosen->height,chosen->samples,fallback!=fi_pass,out->width,out->height);
+        else std::fprintf(stderr,"theft4-fi: no scene pass with a 2D depth attachment in this frame (output %ux%u)\n",
+            out->width,out->height);
       }
     }
   }
@@ -634,8 +655,11 @@ template<bool Diagnostics> Receipt FrameAdapter::SubmitFrameImpl(const std::shar
     for(size_t slot=0;slot<4;++slot)if(dead&(1u<<slot)){descriptor.colorAttachments[slot].storeAction=MTLStoreActionDontCare;if constexpr(Diagnostics)++avoided_stores;}
     const bool fi_scene_pass=command_index-1==fi_pass;
     if((dead&16u)&&!fi_scene_pass){descriptor.depthAttachment.storeAction=MTLStoreActionDontCare;if constexpr(Diagnostics)++avoided_stores;}
-    // Frame interpolation samples this depth after the pass: it must be stored.
-    if(fi_scene_pass&&descriptor.depthAttachment.texture)descriptor.depthAttachment.storeAction=MTLStoreActionStore;
+    // Frame interpolation samples this depth after the pass: it must be stored
+    // (keeping a requested MSAA resolve).
+    if(fi_scene_pass&&descriptor.depthAttachment.texture)
+      descriptor.depthAttachment.storeAction=descriptor.depthAttachment.resolveTexture
+          ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionStore;
     if(dead&32u){descriptor.stencilAttachment.storeAction=MTLStoreActionDontCare;if constexpr(Diagnostics)++avoided_stores;}
     if(dead_load&1u){descriptor.colorAttachments[0].loadAction=MTLLoadActionDontCare;if constexpr(Diagnostics)++avoided_loads;}
     if(!frame.BeginOwnedPass(descriptor,error))return {};
