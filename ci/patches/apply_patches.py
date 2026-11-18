@@ -7,14 +7,28 @@ instead of silently skipping the change.
 import sys
 from pathlib import Path
 
+if len(sys.argv) != 2:
+    sys.exit("usage: apply_patches.py <Theft4 source root (overlay already copied)>")
 root = Path(sys.argv[1])
+if not root.is_dir():
+    sys.exit(f"patch failed: source root {root} does not exist")
 
 def patch(rel, old, new):
     path = root / rel
+    if not path.is_file():
+        sys.exit(f"patch failed: {rel}: file not found under {root} (upstream layout changed?)")
     text = path.read_text()
+    if new in text:
+        # Both patches keep their anchor inside the replacement, so a second
+        # run would insert the block again. Treat it as already applied.
+        print(f"already patched {rel}")
+        return
     count = text.count(old)
     if count != 1:
-        sys.exit(f"patch failed: {rel}: expected 1 match, found {count}")
+        # Show what was expected, so a changed upstream base is easy to rebase.
+        first = old.strip().splitlines()[0] if old.strip() else old
+        sys.exit(f"patch failed: {rel}: expected 1 match, found {count}\n"
+                 f"  anchor starts with: {first!r}")
     path.write_text(text.replace(old, new))
     print(f"patched {rel}")
 
