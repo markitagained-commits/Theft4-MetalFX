@@ -41,14 +41,18 @@ constexpr uint32_t kParkedCarDensity = 0x82AA188C;
 constexpr uint32_t kPedDensity = 0x82AA2940;
 constexpr uint32_t kScenarioPedCurrent = 0x82AA2944;
 constexpr uint32_t kScenarioPedNext = 0x82AA2948;
-const double kScales[] = {0.35, 0.6, 0.8, 1.0};  // Low, Medium, High, Stock
+const double kLegacyScales[] = {0.35, 0.6, 0.8, 1.0};  // old index keys
 
-double ReadScale(CFStringRef key, int fallback) {
-    int index = fallback;
+// Percent key (5..100) written by the launcher; falls back to the older
+// index key, then to Medium (60%). Values outside 1..100 are ignored.
+double ReadScale(CFStringRef percent_key, CFStringRef legacy_key) {
     Boolean ok = false;
-    const CFIndex v = CFPreferencesGetAppIntegerValue(key, kCFPreferencesCurrentApplication, &ok);
-    if (ok && v >= 0 && v <= 3) index = int(v);
-    return kScales[index];
+    const CFIndex pct = CFPreferencesGetAppIntegerValue(percent_key, kCFPreferencesCurrentApplication, &ok);
+    if (ok && pct >= 1 && pct <= 100) return double(pct) / 100.0;
+    ok = false;
+    const CFIndex v = CFPreferencesGetAppIntegerValue(legacy_key, kCFPreferencesCurrentApplication, &ok);
+    if (ok && v >= 0 && v <= 3) return kLegacyScales[v];
+    return 0.6;
 }
 
 struct Slot { uint32_t address; uint32_t written = 0; bool have = false; };
@@ -61,8 +65,8 @@ void Apply(uint8_t* base) {
     int st = state.load(std::memory_order_relaxed);
     if (st < 0) return;
     if (st == 0) {
-        traffic_scale = ReadScale(CFSTR("Theft4TrafficDensity"), 1);
-        ped_scale = ReadScale(CFSTR("Theft4PedDensity"), 1);
+        traffic_scale = ReadScale(CFSTR("Theft4TrafficDensityPct"), CFSTR("Theft4TrafficDensity"));
+        ped_scale = ReadScale(CFSTR("Theft4PedDensityPct"), CFSTR("Theft4PedDensity"));
         const bool ok = Readable(base, kRandomCarDensity, 8) && Readable(base, kPedDensity, 12);
         const bool stock = traffic_scale == 1.0 && ped_scale == 1.0;
         state.store(ok && !stock ? 1 : -1, std::memory_order_relaxed);
@@ -83,6 +87,20 @@ void Apply(uint8_t* base) {
     }
 }
 }  // namespace citydensity
+
+// Read-only snapshot for Long Performance Capture: configured scales, state
+// (0 not yet applied, 1 active, -1 disabled/stock) and the last value seen in
+// each guest multiplier (random cars, parked cars, peds, scenario cur/next).
+extern "C" int theft4_city_density_snapshot(double* traffic, double* peds, float* values5) {
+    if (traffic) *traffic = citydensity::traffic_scale;
+    if (peds) *peds = citydensity::ped_scale;
+    const int st = citydensity::state.load(std::memory_order_relaxed);
+    if (values5) {
+        for (int i = 0; i < 5; ++i)
+            values5[i] = citydensity::slots[i].have ? std::bit_cast<float>(citydensity::slots[i].written) : -1.0f;
+    }
+    return st;
+}
 
 void theft4::motion_blur::Configure(bool value, bool diagnostics) noexcept {
     enabled.store(value, std::memory_order_relaxed);

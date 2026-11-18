@@ -62,6 +62,27 @@ static UIButton *Action(NSString *title, BOOL primary) {
     return button;
 }
 
+// Theft4-MetalFX: density percentages shown by the 6-way density control.
+static const NSInteger kTheft4DensityPercents[] = {5, 15, 35, 60, 80, 100};
+static NSInteger Theft4DensitySegment(NSString *percentKey, NSString *legacyIndexKey) {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSInteger percent = 60;
+    if ([defaults objectForKey:percentKey]) percent = [defaults integerForKey:percentKey];
+    else if ([defaults objectForKey:legacyIndexKey]) {
+        const NSInteger legacy[] = {35, 60, 80, 100};
+        percent = legacy[MAX(0, MIN(3, [defaults integerForKey:legacyIndexKey]))];
+    }
+    for (NSInteger i = 0; i < 6; ++i) if (kTheft4DensityPercents[i] == percent) return i;
+    return 3;
+}
+static void Theft4SaveDensitySegment(NSInteger segment, NSString *percentKey, NSString *legacyIndexKey) {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    const NSInteger percent = kTheft4DensityPercents[MAX(0, MIN(5, segment))];
+    [defaults setInteger:percent forKey:percentKey];
+    // Keep the older index key meaningful for earlier builds (5%/15% -> Low).
+    [defaults setInteger:percent >= 100 ? 3 : percent >= 80 ? 2 : percent >= 60 ? 1 : 0 forKey:legacyIndexKey];
+}
+
 static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *identifier,
                                          NSString *label, NSString *hint) {
     UISegmentedControl *control = [[UISegmentedControl alloc] initWithItems:items];
@@ -104,6 +125,7 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
     UIStackView *_content, *_navigation;
     UIStackView *_play, *_graphics, *_interfacePage, *_system, *_mods;
     UIView *_metalfxModeRow;
+    UISegmentedControl *_metalfxOutput;
     UILabel *_playHeadline, *_playIntro, *_playSaveNote;
     NSArray<UIButton *> *_tabs;
     NSArray<UIView *> *_pages;
@@ -341,10 +363,25 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
         modeButton.accessibilityIdentifier = @"settings.metalfxMode";
         modeButton.accessibilityLabel = @"MetalFX mode";
         [modeButton.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+        // MetalFX output target lives in this same MetalFX row. "Match"
+        // follows Internal Resolution (720p now stays 720p); 720p/1080p/1440p
+        // are fixed MetalFX output sizes.
+        _metalfxOutput = ChoiceControl(@[@"Match", @"720p", @"1080p", @"1440p"], @"metalfxOutput",
+            @"MetalFX output", @"Applies at the next game launch.");
+        {
+            const NSInteger saved = [NSUserDefaults.standardUserDefaults integerForKey:@"Theft4MetalFXOutput"];
+            _metalfxOutput.selectedSegmentIndex = saved == 720 ? 1 : saved == 1080 ? 2 : saved == 1440 ? 3 : 0;
+        }
+        [_metalfxOutput addTarget:self action:@selector(metalfxOutputChanged:)
+            forControlEvents:UIControlEventValueChanged];
+        UILabel *outputLabel = Copy(@"METALFX OUTPUT", 14, YES);
+        outputLabel.textColor = Ink(0xECE7D7);
         UILabel *modeLabel = Copy(@"METALFX MODE", 14, YES);
         modeLabel.textColor = Ink(0xECE7D7);
         _metalfxModeRow = Column(@[modeLabel, modeButton,
-            Copy(@"Native: full screen resolution, no upscaling (sharpest, slowest). Quality: renders 1.5× lower, then upscales. Performance: renders 2× lower. Ultra Performance: renders 3× lower (fastest, softest). Overrides Internal Resolution. Applies at the next game launch.", 12, NO)], 7);
+            Copy(@"Native: full screen resolution, no upscaling (sharpest, slowest). Quality: renders 1.5× lower, then upscales. Performance: renders 2× lower. Ultra Performance: renders 3× lower (fastest, softest). Overrides Internal Resolution. Applies at the next game launch.", 12, NO),
+            outputLabel, _metalfxOutput,
+            Copy(@"Output size MetalFX upscales into. Match uses the Internal Resolution output (720p stays 720p). 720p / 1080p / 1440p force that output; the render size is output ÷ mode ratio (minimum 640×360).", 12, NO)], 7);
         _metalfxModeRow.hidden = !_metalfxUpscaling.on;
         [graphicsRows addObjectsFromArray:@[
             [self setting:@"METALFX UPSCALING"
@@ -386,25 +423,23 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
             presetButtons,
             Copy(@"Auto Optimize selects a starting profile for this device. Original restores 720p, original shadow/distance/detail/reflections, and the title's blur. You can adjust each setting afterward.", 12, NO)
         ]];
-        // Theft4-MetalFX: city density (CPU). Values index Low/Med/High/Stock.
-        _trafficDensity = ChoiceControl(@[@"Low", @"Medium", @"High", @"Stock"], @"trafficDensity",
+        // Theft4-MetalFX: city density (CPU). Stored as a percentage under
+        // Theft4TrafficDensityPct / Theft4PedDensityPct; the older index keys
+        // (0 Low 35%, 1 Medium 60%, 2 High 80%, 3 Stock) are migrated on read.
+        NSArray<NSString *> *densityItems = @[@"5%", @"15%", @"35%", @"60%", @"80%", @"100%"];
+        _trafficDensity = ChoiceControl(densityItems, @"trafficDensity",
             @"Traffic density", @"Applies at the next game launch.");
-        _pedDensity = ChoiceControl(@[@"Low", @"Medium", @"High", @"Stock"], @"pedDensity",
+        _pedDensity = ChoiceControl(densityItems, @"pedDensity",
             @"Pedestrian density", @"Applies at the next game launch.");
-        {
-            NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-            NSInteger t = [defaults objectForKey:@"Theft4TrafficDensity"] ? [defaults integerForKey:@"Theft4TrafficDensity"] : 1;
-            NSInteger p = [defaults objectForKey:@"Theft4PedDensity"] ? [defaults integerForKey:@"Theft4PedDensity"] : 1;
-            _trafficDensity.selectedSegmentIndex = MAX(0, MIN(3, t));
-            _pedDensity.selectedSegmentIndex = MAX(0, MIN(3, p));
-        }
+        _trafficDensity.selectedSegmentIndex = Theft4DensitySegment(@"Theft4TrafficDensityPct", @"Theft4TrafficDensity");
+        _pedDensity.selectedSegmentIndex = Theft4DensitySegment(@"Theft4PedDensityPct", @"Theft4PedDensity");
         [_trafficDensity addTarget:self action:@selector(trafficDensityChanged:) forControlEvents:UIControlEventValueChanged];
         [_pedDensity addTarget:self action:@selector(pedDensityChanged:) forControlEvents:UIControlEventValueChanged];
         [graphicsRows addObject:[self choice:@"TRAFFIC DENSITY"
-            detail:@"Amount of cars driving and parked. Lower saves CPU. Low 35%, Medium 60%, High 80% of stock. Applies at the next game launch."
+            detail:@"Share of GTA IV's own car spawn multiplier (driving and parked). Lower spawns fewer cars, which saves CPU. 60% is the default. Missions that clear the streets still do. Applies at the next game launch."
             control:_trafficDensity]];
         [graphicsRows addObject:[self choice:@"PEDESTRIAN DENSITY"
-            detail:@"Amount of people on the street. Lower saves CPU. Low 35%, Medium 60%, High 80% of stock. Applies at the next game launch."
+            detail:@"Share of GTA IV's own pedestrian spawn multiplier (ambient and scenario). Lower spawns fewer people, which saves CPU. 60% is the default. Applies at the next game launch."
             control:_pedDensity]];
     }
 
@@ -973,7 +1008,9 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
             : theft4_output_policy_for_lab(self.renderHeight, _fsrUpscaling.on,
                 nativeWidth, nativeHeight);
         const int metalfxMode = _metalfxUpscaling.on ? (int)MAX(0, MIN(3, _metalfxMode.selectedSegmentIndex)) + 1 : 0;
-        if (metalfxMode > 0) output = theft4_apply_metalfx_preset(output, metalfxMode);
+        const NSInteger outputChoice = _metalfxOutput.selectedSegmentIndex;
+        if (metalfxMode > 0) output = theft4_apply_metalfx_preset_output(output, metalfxMode,
+            outputChoice == 1 ? 720 : outputChoice == 2 ? 1080 : outputChoice == 3 ? 1440 : 0);
         _resolutionSummary.text = [NSString stringWithFormat:@"%u × %u  →  %u × %u\n%@ · NEXT GAME LAUNCH",
             output.render_width, output.render_height, output.output_width, output.output_height,
             [NSString stringWithFormat:@"%@ · %@",
@@ -1013,10 +1050,10 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
     [self retireScene];
 }
 - (void)trafficDensityChanged:(UISegmentedControl *)sender {
-    [NSUserDefaults.standardUserDefaults setInteger:sender.selectedSegmentIndex forKey:@"Theft4TrafficDensity"];
+    Theft4SaveDensitySegment(sender.selectedSegmentIndex, @"Theft4TrafficDensityPct", @"Theft4TrafficDensity");
 }
 - (void)pedDensityChanged:(UISegmentedControl *)sender {
-    [NSUserDefaults.standardUserDefaults setInteger:sender.selectedSegmentIndex forKey:@"Theft4PedDensity"];
+    Theft4SaveDensitySegment(sender.selectedSegmentIndex, @"Theft4PedDensityPct", @"Theft4PedDensity");
 }
 - (void)saveMetalFXMode {
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
@@ -1032,6 +1069,12 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
     }
     [self saveMetalFXMode];
     [UIView animateWithDuration:0.2 animations:^{ self->_metalfxModeRow.hidden = !sender.on; }];
+    [self refreshConfigurationSummary];
+}
+- (void)metalfxOutputChanged:(UISegmentedControl *)sender {
+    const NSInteger i = sender.selectedSegmentIndex;
+    [NSUserDefaults.standardUserDefaults setInteger:(i == 1 ? 720 : i == 2 ? 1080 : i == 3 ? 1440 : 0)
+        forKey:@"Theft4MetalFXOutput"];
     [self refreshConfigurationSummary];
 }
 - (void)metalfxModeChanged:(UISegmentedControl *)sender {

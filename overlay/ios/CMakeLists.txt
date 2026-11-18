@@ -219,6 +219,7 @@ if(THEFT4_ENABLE_GAME_STARTUP)
             # Strong stage wrappers must be in this force-loaded archive.
             "${THEFT4_GTA4_RECOMP_SOURCE_ROOT}/gta4_physics_hooks.cpp"
             bridge/theft4_motion_blur.cpp
+            bridge/theft4_perf_stats.cpp
             "${THEFT4_GTA4_NATIVE_SHADER_CACHE_ROOT}/shader/shader_cache.cpp"
             "${THEFT4_GTA4_NATIVE_SMOLV_ROOT}/smolv.cpp")
         target_include_directories(theft4_gta4_native_compile PRIVATE

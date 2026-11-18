@@ -40,8 +40,13 @@ int MetalFXPreset() {
   return value >= 0 && value < THEFT4_METALFX_PRESET_COUNT ? int(value) : THEFT4_METALFX_PRESET_DEFAULT;
 }
 
+uint32_t MetalFXOutputHeight() {
+  return theft4_metalfx_output_height(int([NSUserDefaults.standardUserDefaults
+      integerForKey:@THEFT4_METALFX_OUTPUT_KEY]));
+}
+
 void SetOutputPolicy(theft4_output_policy output) {
-  output = theft4_apply_metalfx_preset(output, MetalFXPreset());
+  output = theft4_apply_metalfx_preset_output(output, MetalFXPreset(), MetalFXOutputHeight());
   os_unfair_lock_lock(&presenter_lock);
   launch_output = output;
   if (bound_layer) {

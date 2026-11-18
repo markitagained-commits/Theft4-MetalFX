@@ -2,6 +2,7 @@
 #include "theft4_metal_frame.h"
 #include "theft4_metal_host_shaders.h"
 #include "theft4_upscale_preset.h"
+#include "theft4_perf_stats.h"
 #import <MetalFX/MetalFX.h>
 #import <Foundation/Foundation.h>
 #include <algorithm>
@@ -403,6 +404,7 @@ Receipt FrameAdapter::SubmitAndPresent(const std::shared_ptr<const render::Frame
 }
 template<bool Diagnostics> Receipt FrameAdapter::SubmitFrameImpl(const std::shared_ptr<const render::FramePlan>& plan,
                                  render::SurfaceKey target,id<CAMetalDrawable> drawable,std::string& error,render::SurfaceContents* published,bool profile_gpu) {
+  theft4_perf_mark_submit_begin();
   using Clock=std::chrono::steady_clock;
   const auto clock_now=[] {if constexpr(Diagnostics)return Clock::now();else return Clock::time_point{};};
   const auto begin=clock_now();

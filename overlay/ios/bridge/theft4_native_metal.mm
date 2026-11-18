@@ -1,7 +1,9 @@
 #include "theft4_retail_mode.h"
 #include "theft4_trait_cache.h"
 #include "theft4_native_metal.h"
+#include "theft4_perf_stats.h"
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -175,6 +177,8 @@ struct Frame::Impl {
   bool submitted = false;
   id<MTLTexture> stored_color = nil;
   bool presented = false;
+  // Theft4-MetalFX capture: only filled while Long Performance Capture runs.
+  uint64_t perf_slot_wait_ns=0,perf_submit_begin_ns=0,perf_begin_ns=0;
   struct Bind {const void* object=nullptr;NSUInteger offset=0;};
   struct State {
     bool valid=false;
@@ -436,10 +440,22 @@ PipelineCompilationStats Renderer::CompilationStats() const{return impl_->compil
 Frame Renderer::BeginFrame(std::string& error) {
   if (!Ready()) { error = "Direct Metal renderer is unavailable"; return {}; }
   // Bounded wait. Aborted frames release the lease just like completed frames.
+  const bool perf = theft4_perf_enabled();
+  const uint64_t submit_begin = perf ? theft4_perf_take_submit_begin() : 0;
+  const uint64_t wait_begin = perf ? theft4_perf_now_ns() : 0;
   if (dispatch_semaphore_wait(impl_->slots, dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC))) {
+    if (perf) {
+      theft4_perf_event event{};event.kind=THEFT4_PERF_EVENT_SLOT_TIMEOUT;
+      event.slot_wait_ns=theft4_perf_now_ns()-wait_begin;theft4_perf_record(&event);
+    }
     error = "All direct Metal frame slots are still in use"; return {};
   }
   auto p = std::make_unique<Frame::Impl>();
+  if (perf) {
+    p->perf_begin_ns = theft4_perf_now_ns();
+    p->perf_slot_wait_ns = p->perf_begin_ns - wait_begin;
+    p->perf_submit_begin_ns = submit_begin ? submit_begin : wait_begin;
+  }
   p->renderer=impl_;
   p->lease = std::shared_ptr<void>(impl_.get(), [owner = impl_](void*) {
     dispatch_semaphore_signal(owner->slots);
@@ -764,6 +780,16 @@ bool Frame::Present(id<CAMetalDrawable> drawable, std::string& error) {
       drawable.texture != impl_->stored_color)
     return Error(error, "Metal presentation requires the stored drawable pass");
   if(impl_->blit){[impl_->blit endEncoding];impl_->blit=nil;}
+  if (theft4_perf_enabled()) {
+    // Presented handler: presentedTime is the host time the drawable reached
+    // the display, 0 when it was dropped. This is real presented pacing.
+    [drawable addPresentedHandler:^(id<MTLDrawable> shown) {
+      theft4_perf_event event{};event.kind=THEFT4_PERF_EVENT_PRESENTED;
+      event.sequence=uint64_t(shown.drawableID);
+      event.gpu_end_ns=shown.presentedTime>0?uint64_t(shown.presentedTime*1e9):0;
+      theft4_perf_record(&event);
+    }];
+  }
   [impl_->buffer presentDrawable:drawable]; impl_->presented = true; return true;
 }
 void Frame::RetainUntilCompletion(std::shared_ptr<void> lease) {
@@ -776,6 +802,24 @@ Receipt Frame::Submit(std::string& error) {
   auto lease = impl_->lease;
   auto uploads=impl_->upload_lease;
   [impl_->buffer addCompletedHandler:^(id<MTLCommandBuffer>) { (void)lease;(void)uploads; }];
+  if (impl_->perf_begin_ns && theft4_perf_enabled()) {
+    static std::atomic<uint64_t> perf_sequence{0};
+    const uint64_t now=theft4_perf_now_ns();
+    theft4_perf_event event{};event.kind=THEFT4_PERF_EVENT_FRAME;
+    event.sequence=++perf_sequence;event.commit_ns=now;
+    event.slot_wait_ns=impl_->perf_slot_wait_ns;
+    event.cpu_prepare_ns=now-impl_->perf_submit_begin_ns;
+    event.cpu_encode_ns=now-impl_->perf_begin_ns;
+    event.value=impl_->presented?1:0;
+    [impl_->buffer addCompletedHandler:^(id<MTLCommandBuffer> done) {
+      theft4_perf_event completed=event;
+      if(done.status==MTLCommandBufferStatusCompleted&&done.GPUEndTime>done.GPUStartTime) {
+        completed.gpu_start_ns=uint64_t(done.GPUStartTime*1e9);
+        completed.gpu_end_ns=uint64_t(done.GPUEndTime*1e9);
+      }
+      theft4_perf_record(&completed);
+    }];
+  }
   result.buffer_ = impl_->buffer;
   result.counters_=impl_->counters;result.profiled_passes_=impl_->profiled_passes;result.pass_mapping_=std::move(impl_->pass_mapping);
   result.cpu_reference_=impl_->cpu_reference;result.gpu_reference_=impl_->gpu_reference;

@@ -12,6 +12,9 @@
 #include <stdint.h>
 #include <math.h>
 #include <mach-o/dyld.h>
+#include <mach/mach.h>
+#include <os/proc.h>
+#include "theft4_perf_stats.h"
 #include "../../glue/rexglue-sdk-main/include/rex/diagnostics/runtime_callers.h"
 #include "../../glue/rexglue-sdk-main/include/rex/diagnostics/frame_scheduling.h"
 #include "theft4_core.h"
@@ -532,6 +535,23 @@ static BOOL Theft4InstallSaveExport(NSURL *selected, NSURL *support, NSURL *docu
     NSUInteger _schedulingBytes;
     BOOL _schedulingFull;
     dispatch_source_t _runtimeCallerTimer;
+    // Theft4-MetalFX: extended frame statistics (export queue only after start).
+    uint64_t _perfCursor;
+    NSMutableString *_perfRows;
+    NSMutableString *_perfSystemRows;
+    NSUInteger _perfBytes;
+    BOOL _perfFull;
+    NSMutableData *_perfPresentedMs, *_perfGpuMs, *_perfPrepareMs, *_perfEncodeMs, *_perfWaitMs;
+    uint64_t _perfLastPresentNs, _perfFirstPresentNs, _perfLatestPresentNs;
+    uint64_t _perfPresented, _perfDropped, _perfFrames, _perfLost, _perfTimeouts, _perfInterpolated;
+    uint64_t _perfFirstCommitNs, _perfLastCommitNs, _perfPeakFootprint, _perfMinAvailable;
+    NSInteger _perfMaxThermal;
+    NSUInteger _perfThermalCounts[4];
+    dispatch_source_t _memoryPressureSource;
+    uintptr_t _memoryPressureLevel;
+    NSUInteger _memoryPressureWarnings, _memoryPressureCriticals;
+    NSURL *_perfFramesURL, *_perfSystemURL, *_perfSummaryURL;
+    CFTimeInterval _perfStartTime;
     NSURL *_runtimeCallerURL;
     NSMutableString *_runtimeCallerRows; // export queue only after start
     NSUInteger _runtimeCallerBytes; // export queue only, bounded across flushes
@@ -2691,6 +2711,16 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
             if ([fm fileExistsAtPath:callerCapture.path]) success = success && Theft4AppendDiagnosticFile(stream,
                 callerCapture, [@"Theft4/startup/frame-captures/" stringByAppendingString:callerCapture.lastPathComponent],
                 &budget, included, skipped);
+            for (NSString *prefix in @[@"perf-frames-", @"perf-system-", @"perf-summary-"]) {
+                NSString *name = [latestFrameCapture.lastPathComponent
+                    stringByReplacingOccurrencesOfString:@"publication-trace-" withString:prefix];
+                if ([prefix isEqualToString:@"perf-summary-"])
+                    name = [name stringByReplacingOccurrencesOfString:@".csv" withString:@".json"];
+                NSURL *perfCapture = [frameDirectory URLByAppendingPathComponent:name];
+                if ([fm fileExistsAtPath:perfCapture.path]) success = success && Theft4AppendDiagnosticFile(stream,
+                    perfCapture, [@"Theft4/startup/frame-captures/" stringByAppendingString:name],
+                    &budget, included, skipped);
+            }
             NSURL *schedulingCapture = [frameDirectory URLByAppendingPathComponent:
                 [latestFrameCapture.lastPathComponent stringByReplacingOccurrencesOfString:@"publication-trace-" withString:@"frame-scheduling-"]];
             if ([fm fileExistsAtPath:schedulingCapture.path]) success = success && Theft4AppendDiagnosticFile(stream,
@@ -3085,9 +3115,203 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     }
 }
 
+
+// ---- Theft4-MetalFX: extended Long Performance Capture statistics ----
+static uint64_t Theft4FootprintBytes(void) {
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) return 0;
+    return info.phys_footprint;
+}
+
+static double Theft4Percentile(NSData *data, double p) {
+    const NSUInteger n = data.length / sizeof(double);
+    if (!n) return 0;
+    double *copy = malloc(n * sizeof(double));
+    memcpy(copy, data.bytes, n * sizeof(double));
+    // Insertion into sorted order via qsort.
+    qsort_b(copy, n, sizeof(double), ^int(const void *a, const void *b) {
+        const double x = *(const double *)a, y = *(const double *)b; return x < y ? -1 : x > y; });
+    const double rank = p * (double)(n - 1);
+    const NSUInteger lo = (NSUInteger)floor(rank), hi = MIN(n - 1, lo + 1);
+    const double value = copy[lo] + (copy[hi] - copy[lo]) * (rank - lo);
+    free(copy);
+    return value;
+}
+
+static NSDictionary *Theft4Distribution(NSData *data) {
+    const NSUInteger n = data.length / sizeof(double);
+    double sum = 0, mx = 0;
+    const double *v = data.bytes;
+    for (NSUInteger i = 0; i < n; ++i) { sum += v[i]; if (v[i] > mx) mx = v[i]; }
+    return @{@"samples": @(n), @"mean_ms": @(n ? sum / n : 0), @"p50_ms": @(Theft4Percentile(data, 0.50)),
+             @"p95_ms": @(Theft4Percentile(data, 0.95)), @"p99_ms": @(Theft4Percentile(data, 0.99)), @"max_ms": @(mx)};
+}
+
+static void Theft4AppendDouble(NSMutableData *data, double value) { [data appendBytes:&value length:sizeof value]; }
+
+- (void)beginPerfStatsWithDirectory:(NSURL *)directory suffix:(NSString *)suffix {
+    _perfFramesURL = [directory URLByAppendingPathComponent:[NSString stringWithFormat:@"perf-frames-%@", suffix]];
+    _perfSystemURL = [directory URLByAppendingPathComponent:[NSString stringWithFormat:@"perf-system-%@", suffix]];
+    _perfSummaryURL = [directory URLByAppendingPathComponent:[[NSString stringWithFormat:@"perf-summary-%@", suffix]
+        stringByReplacingOccurrencesOfString:@".csv" withString:@".json"]];
+    _perfRows = [NSMutableString new];
+    _perfSystemRows = [NSMutableString new];
+    _perfBytes = 0; _perfFull = NO;
+    _perfPresentedMs = [NSMutableData new]; _perfGpuMs = [NSMutableData new];
+    _perfPrepareMs = [NSMutableData new]; _perfEncodeMs = [NSMutableData new]; _perfWaitMs = [NSMutableData new];
+    _perfLastPresentNs = _perfFirstPresentNs = _perfLatestPresentNs = 0;
+    _perfPresented = _perfDropped = _perfFrames = _perfLost = _perfTimeouts = _perfInterpolated = 0;
+    _perfFirstCommitNs = _perfLastCommitNs = _perfPeakFootprint = 0;
+    _perfMinAvailable = UINT64_MAX;
+    _perfMaxThermal = 0;
+    memset(_perfThermalCounts, 0, sizeof _perfThermalCounts);
+    _memoryPressureLevel = 0; _memoryPressureWarnings = _memoryPressureCriticals = 0;
+    _perfStartTime = CACurrentMediaTime();
+    _perfCursor = theft4_perf_start();
+}
+
+- (void)startMemoryPressureMonitorOnQueue:(dispatch_queue_t)queue {
+    if (_memoryPressureSource) return;
+    _memoryPressureSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0,
+        DISPATCH_MEMORYPRESSURE_NORMAL | DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL, queue);
+    __weak __typeof__(self) weakSelf = self;
+    dispatch_source_set_event_handler(_memoryPressureSource, ^{
+        __typeof__(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        const uintptr_t level = dispatch_source_get_data(strongSelf->_memoryPressureSource);
+        strongSelf->_memoryPressureLevel = level;
+        if (level & DISPATCH_MEMORYPRESSURE_WARN) ++strongSelf->_memoryPressureWarnings;
+        if (level & DISPATCH_MEMORYPRESSURE_CRITICAL) ++strongSelf->_memoryPressureCriticals;
+        [strongSelf->_perfSystemRows appendFormat:@"%llu,memory-pressure,%lu,,,,\n",
+            (unsigned long long)theft4_perf_now_ns(), (unsigned long)level];
+    });
+    dispatch_resume(_memoryPressureSource);
+}
+
+// Export queue only. Drains the renderer's event ring and takes one system sample.
+- (void)collectPerfStats {
+    if (!_perfRows) return;
+    theft4_perf_event events[512];
+    for (unsigned batch = 0; batch < 256; ++batch) {
+        uint64_t lost = 0;
+        const uint32_t count = theft4_perf_read(&_perfCursor, events, 512, &lost);
+        _perfLost += lost;
+        NSMutableString *text = [NSMutableString new];
+        for (uint32_t i = 0; i < count; ++i) {
+            const theft4_perf_event *e = &events[i];
+            if (e->kind == THEFT4_PERF_EVENT_FRAME) {
+                ++_perfFrames;
+                if (!_perfFirstCommitNs) _perfFirstCommitNs = e->commit_ns;
+                _perfLastCommitNs = e->commit_ns;
+                const double gpu = e->gpu_end_ns > e->gpu_start_ns && e->gpu_start_ns ? (e->gpu_end_ns - e->gpu_start_ns) / 1e6 : -1;
+                if (gpu >= 0) Theft4AppendDouble(_perfGpuMs, gpu);
+                Theft4AppendDouble(_perfPrepareMs, e->cpu_prepare_ns / 1e6);
+                Theft4AppendDouble(_perfEncodeMs, e->cpu_encode_ns / 1e6);
+                Theft4AppendDouble(_perfWaitMs, e->slot_wait_ns / 1e6);
+                [text appendFormat:@"frame,%llu,%llu,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu\n",
+                    (unsigned long long)e->sequence, (unsigned long long)e->commit_ns,
+                    e->slot_wait_ns / 1e6, e->cpu_prepare_ns / 1e6, e->cpu_encode_ns / 1e6, gpu,
+                    (unsigned long long)e->gpu_start_ns, (unsigned long long)e->gpu_end_ns, (unsigned long long)e->value];
+            } else if (e->kind == THEFT4_PERF_EVENT_PRESENTED) {
+                if (!e->gpu_end_ns) { ++_perfDropped; [text appendFormat:@"dropped,%llu,,,,,,,,\n", (unsigned long long)e->sequence]; continue; }
+                ++_perfPresented;
+                if (!_perfFirstPresentNs) _perfFirstPresentNs = e->gpu_end_ns;
+                double interval = -1;
+                if (_perfLastPresentNs && e->gpu_end_ns > _perfLastPresentNs) {
+                    interval = (e->gpu_end_ns - _perfLastPresentNs) / 1e6;
+                    // Gaps over 1 s are pauses/menus, not frame times.
+                    if (interval < 1000.0) Theft4AppendDouble(_perfPresentedMs, interval);
+                }
+                if (e->gpu_end_ns > _perfLastPresentNs) _perfLastPresentNs = e->gpu_end_ns;
+                _perfLatestPresentNs = _perfLastPresentNs;
+                [text appendFormat:@"presented,%llu,%llu,,,,%.3f,,,\n", (unsigned long long)e->sequence,
+                    (unsigned long long)e->gpu_end_ns, interval];
+            } else if (e->kind == THEFT4_PERF_EVENT_SLOT_TIMEOUT) {
+                ++_perfTimeouts;
+                [text appendFormat:@"slot-timeout,,,%.3f,,,,,,\n", e->slot_wait_ns / 1e6];
+            } else if (e->kind == THEFT4_PERF_EVENT_INTERPOLATED) {
+                ++_perfInterpolated;
+                [text appendFormat:@"interpolated,%llu,%llu,,,,,,,%llu\n", (unsigned long long)e->sequence,
+                    (unsigned long long)e->commit_ns, (unsigned long long)e->value];
+            }
+        }
+        if (!_perfFull) {
+            if (_perfBytes + text.length > 24 * 1024 * 1024) {
+                _perfFull = YES;
+                [_perfRows appendString:@"# capacity_reached: per-frame rows stopped at 24 MiB; summary keeps counting\n"];
+            } else { _perfBytes += text.length; [_perfRows appendString:text]; }
+        }
+        if (count < 512) break;
+    }
+    const uint64_t footprint = Theft4FootprintBytes();
+    const uint64_t available = (uint64_t)os_proc_available_memory();
+    const NSInteger thermal = NSProcessInfo.processInfo.thermalState;
+    if (footprint > _perfPeakFootprint) _perfPeakFootprint = footprint;
+    if (available && available < _perfMinAvailable) _perfMinAvailable = available;
+    if (thermal > _perfMaxThermal) _perfMaxThermal = thermal;
+    if (thermal >= 0 && thermal < 4) ++_perfThermalCounts[thermal];
+    [_perfSystemRows appendFormat:@"%llu,sample,%lu,%llu,%llu,%ld,%llu\n",
+        (unsigned long long)theft4_perf_now_ns(), (unsigned long)_memoryPressureLevel,
+        (unsigned long long)footprint, (unsigned long long)available, (long)thermal,
+        (unsigned long long)theft4_frame_counter_published_frames()];
+}
+
+// Export queue only. Rewrites the three files with everything collected so far.
+- (void)writePerfFiles {
+    if (!_perfRows || !_perfFramesURL) return;
+    NSString *frames = [@"# Theft4-MetalFX frame statistics. times ns (uptime clock) or ms; frame=direct-Metal command buffer (slot_wait=Renderer::BeginFrame semaphore wait, 3 slots, 50 ms limit; cpu_prepare=adapter submit start->commit; cpu_encode=BeginFrame->commit; gpu=MTLCommandBuffer GPUEndTime-GPUStartTime, -1 unavailable); presented=MTLDrawable presentedTime (interval_ms to previous presented); dropped=drawable never shown\nkind,sequence,time_ns,slot_wait_ms,cpu_prepare_ms,cpu_encode_ms,gpu_or_interval_ms,gpu_start_ns,gpu_end_ns,presented_or_latency\n" stringByAppendingString:_perfRows];
+    [frames writeToURL:_perfFramesURL atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    NSString *system = [@"# thermal 0 nominal 1 fair 2 serious 3 critical; memory_pressure dispatch flags 1 normal 2 warn 4 critical\ntime_ns,kind,memory_pressure,footprint_bytes,available_bytes,thermal_state,published_frames\n" stringByAppendingString:_perfSystemRows];
+    [system writeToURL:_perfSystemURL atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    const double presentedSeconds = _perfLatestPresentNs > _perfFirstPresentNs ? (_perfLatestPresentNs - _perfFirstPresentNs) / 1e9 : 0;
+    const double submitSeconds = _perfLastCommitNs > _perfFirstCommitNs ? (_perfLastCommitNs - _perfFirstCommitNs) / 1e9 : 0;
+    double trafficScale = 0, pedScale = 0; float multipliers[5] = {0};
+    const int densityState = theft4_city_density_snapshot(&trafficScale, &pedScale, multipliers);
+    const theft4_output_policy output = theft4_metal_get_output_policy();
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSDictionary *summary = @{
+        @"schema": @"theft4-metalfx-perf-summary/1",
+        @"build": NSBundle.mainBundle.infoDictionary[@"CFBundleVersion"] ?: @"",
+        @"capture_seconds": @(CACurrentMediaTime() - _perfStartTime),
+        @"presented": @{@"frames": @(_perfPresented), @"dropped_drawables": @(_perfDropped),
+                        @"fps": @(presentedSeconds > 0 && _perfPresented > 1 ? (_perfPresented - 1) / presentedSeconds : 0),
+                        @"frame_time": Theft4Distribution(_perfPresentedMs),
+                        @"note": @"From MTLDrawable presentedTime; gaps over 1 s (menus/pauses) are excluded from frame_time"},
+        @"submitted": @{@"frames": @(_perfFrames),
+                        @"fps": @(submitSeconds > 0 && _perfFrames > 1 ? (_perfFrames - 1) / submitSeconds : 0)},
+        @"gpu_command_buffer": Theft4Distribution(_perfGpuMs),
+        @"cpu_prepare": Theft4Distribution(_perfPrepareMs),
+        @"cpu_encode": Theft4Distribution(_perfEncodeMs),
+        @"frame_slot_wait": [Theft4Distribution(_perfWaitMs) mutableCopy],
+        @"frame_slot_timeouts": @(_perfTimeouts),
+        @"interpolated_frames": @(_perfInterpolated),
+        @"lost_events": @(_perfLost),
+        @"memory": @{@"peak_footprint_bytes": @(_perfPeakFootprint),
+                     @"min_available_bytes": @(_perfMinAvailable == UINT64_MAX ? 0 : _perfMinAvailable),
+                     @"pressure_warnings": @(_memoryPressureWarnings), @"pressure_criticals": @(_memoryPressureCriticals)},
+        @"thermal": @{@"max_state": @(_perfMaxThermal),
+                      @"samples_by_state": @[@(_perfThermalCounts[0]), @(_perfThermalCounts[1]), @(_perfThermalCounts[2]), @(_perfThermalCounts[3])],
+                      @"legend": @"0 nominal, 1 fair, 2 serious, 3 critical (one sample per second)"},
+        @"settings": @{@"render": [NSString stringWithFormat:@"%ux%u", output.render_width, output.render_height],
+                       @"output": [NSString stringWithFormat:@"%ux%u", output.output_width, output.output_height],
+                       @"metalfx_mode": @([defaults integerForKey:@"Theft4MetalFXMode"]),
+                       @"metalfx_output": @([defaults integerForKey:@"Theft4MetalFXOutput"]),
+                       @"traffic_scale": @(trafficScale), @"ped_scale": @(pedScale),
+                       @"density_state": @(densityState),
+                       @"density_multipliers_written": @[@(multipliers[0]), @(multipliers[1]), @(multipliers[2]), @(multipliers[3]), @(multipliers[4])],
+                       @"density_legend": @"state 1 active, -1 stock/disabled, 0 not applied yet; multipliers = random cars, parked cars, peds, scenario current, scenario next (-1 not written)"},
+    };
+    NSData *json = [NSJSONSerialization dataWithJSONObject:summary
+        options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
+    [json writeToURL:_perfSummaryURL atomically:YES];
+}
+
 // Runs only on the capture export queue, at most once per second. This is
 // sampled wall time (including descheduling), not CPU time or a full stack trace.
 - (void)collectRuntimeCallers {
+    [self collectPerfStats];
     [self collectFrameScheduling];
     if (_runtimeCallerFull || !_runtimeCallerRows) return;
     const uint64_t now = (uint64_t)(CACurrentMediaTime() * 1e9);
@@ -3149,6 +3373,8 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (!_publicationCaptureActive || !_publicationCaptureQueue) return;
     dispatch_async(_publicationCaptureQueue, ^{
         [self flushRuntimeCallers];
+        [self collectPerfStats];
+        [self writePerfFiles];
         theft4_publication_sample samples[256];
         NSMutableString *text = [NSMutableString new];
         uint64_t lost = 0;
@@ -3268,6 +3494,9 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     _lightCaptureCursor = rex_gta4_light_capture_start();
     _publicationCaptureQueue = dispatch_queue_create("theft4.publication-capture",
         dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
+    [self beginPerfStatsWithDirectory:directory suffix:[_publicationCaptureURL.lastPathComponent
+        stringByReplacingOccurrencesOfString:@"publication-trace-" withString:@""]];
+    [self startMemoryPressureMonitorOnQueue:_publicationCaptureQueue];
     _runtimeCallerTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _publicationCaptureQueue);
     dispatch_source_set_timer(_runtimeCallerTimer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), NSEC_PER_SEC, NSEC_PER_SEC / 5);
     __weak __typeof__(self) weakSelf = self;
@@ -3292,6 +3521,13 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     theft4_publication_capture_stop();
     rex_gta4_light_capture_stop();
     [self drainPublicationCapture];
+    theft4_perf_stop();
+    // Late completion/presented handlers land after stop is requested; take
+    // them once more and rewrite the summary.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 4), _publicationCaptureQueue, ^{
+        [self collectPerfStats];
+        [self writePerfFiles];
+    });
     _publicationCaptureActive = NO;
     [_frameTimeView setCaptureRequested:NO];
     dispatch_async(_publicationCaptureQueue, ^{ [self appendPublicationCaptureText:@"status,,,,saved\n"]; });
