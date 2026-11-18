@@ -55,8 +55,16 @@ static inline theft4_output_policy theft4_apply_metalfx_preset_output(
     // output below 1080p (e.g. the 720p choice) to 1920x1080 here, which made
     // "720p + MetalFX Native/Quality" render at 1080p/720p and present at
     // 1080p. MetalFX now upscales into the selected output (720p stays 720p).
-    const double ratio = theft4_metalfx_ratio(preset);
-    // The runtime hook rejects scenes below 640x360; clamp to that floor.
+    double ratio = theft4_metalfx_ratio(preset);
+    // The runtime hook rejects scenes below 640x360. Reduce the ratio
+    // uniformly so neither axis falls under that floor; clamping each axis on
+    // its own changed the scene aspect (e.g. 1560x720 Native Aspect at 3x gave
+    // a 16:9 640x360 scene stretched to 19.5:9).
+    if (ratio > 1.0 && policy.output_width / ratio < 640.0)
+        ratio = policy.output_width / 640.0;
+    if (ratio > 1.0 && policy.output_height / ratio < 360.0)
+        ratio = policy.output_height / 360.0;
+    if (ratio < 1.0) ratio = 1.0;
     uint32_t render_width = theft4_metalfx_even(policy.output_width / ratio, 640);
     uint32_t render_height = theft4_metalfx_even(policy.output_height / ratio, 360);
     if (render_width > policy.output_width) render_width = policy.output_width;
