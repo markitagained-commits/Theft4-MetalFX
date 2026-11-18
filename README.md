@@ -43,6 +43,10 @@ These scale GTA IV's own population multipliers (random cars, parked cars, ambie
 ### Performance capture
 System → **LONG PERFORMANCE CAPTURE** now also writes `perf-frames-*.csv`, `perf-system-*.csv` and `perf-summary-*.json`: presented FPS and frame-time p50/p95/p99 (from real display times), CPU prepare/encode time, frame-slot and drawable waits, GPU time per command buffer, memory footprint and pressure, thermal state, and frame-generation stats. Download Latest Log Capture includes them.
 
+### Performance overlay and benchmark
+- System → **PERFORMANCE OVERLAY** (Off by default): top-left box with **Rendered** (real game frames) and **Generated** (MetalFX frame generation) as per-second rates and totals since you turned it on, plus presented FPS and real frame time. Generated stays 0 when frame generation is off.
+- System → **BENCHMARK (60 S)** (off each launch): arms the capture. In game, three-finger tap → **Start 60 s Benchmark** at the same spot or route each time. You get rendered/generated FPS, frame-time p50/p95/p99, GPU and CPU time, waits, thermal and memory, a `benchmark-*.json` in the log capture, and a recommended traffic/pedestrian/MetalFX/resolution profile with **Apply for Next Launch**. Repeat until it says Stable.
+
 ## Best settings for FPS
 - Frame Speed preset + MetalFX Performance + Traffic and Pedestrians on Low or Medium
 - Lock to 30 FPS for smoother frame pacing

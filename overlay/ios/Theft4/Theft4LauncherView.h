@@ -33,6 +33,7 @@
 @property(nonatomic, readonly) UISegmentedControl *reflectionQuality;
 @property(nonatomic, readonly) UISegmentedControl *antiAliasing;
 @property(nonatomic, readonly) UISwitch *performanceCapture;
+@property(nonatomic, readonly) UISwitch *benchmarkMode;
 @property(nonatomic, readonly) UISwitch *skipIntro;
 @property(nonatomic, readonly) UISwitch *customTimeCycle;
 @property(nonatomic, readonly) UISwitch *nativeAspect;

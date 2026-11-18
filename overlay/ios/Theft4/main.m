@@ -503,6 +503,18 @@ static BOOL Theft4InstallSaveExport(NSURL *selected, NSURL *support, NSURL *docu
     uint64_t _overlayRenderedBase, _overlayGeneratedBase, _overlayRenderedLast, _overlayGeneratedLast;
     CFTimeInterval _overlayLastTime;
     BOOL _overlayBaseSet;
+    // Theft4-MetalFX benchmark. _bench* except _benchTimer live on the export queue.
+    UISwitch *_benchmarkMode;
+    NSTimer *_benchTimer;
+    BOOL _benchRunning;          // main thread
+    BOOL _benchActive;           // export queue
+    NSUInteger _benchOffReal, _benchOffPresented, _benchOffGpu, _benchOffPrepare, _benchOffWait, _benchOffDrawable;
+    uint64_t _benchRenderedStart, _benchGeneratedStart, _benchPeakFootprint, _benchMinAvailable;
+    NSInteger _benchMaxThermal, _benchStartThermal;
+    NSUInteger _benchPressureStart;
+    CFTimeInterval _benchStartTime;
+    NSMutableData *_perfRealMs;
+    uint64_t _perfLastRealNs;
     NSTimer *_fpsTimer;
     dispatch_queue_t _publicationCaptureQueue;
     NSURL *_publicationCaptureURL;
@@ -847,6 +859,7 @@ static void bootEvent(void *context, const char *event) {
     _showFrameTime = _bringupOverlay.showFrameTime;
     _showFPS = _bringupOverlay.showFPS; _showControls = _bringupOverlay.showControls;
     _perfOverlay = _bringupOverlay.perfOverlay;
+    _benchmarkMode = _bringupOverlay.benchmarkMode;
     _anisotropicFiltering = _bringupOverlay.anisotropicFiltering;
     _enhancedOutput = _bringupOverlay.enhancedOutput; _fsrBoost = _bringupOverlay.fsrBoost;
     _motionBlur = _bringupOverlay.motionBlur;
@@ -2306,6 +2319,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
 - (void)resetAutomaticCaptureForNewSession {
     _performanceCapture.on = NO;
+    _benchmarkMode.on = NO;
     [NSUserDefaults.standardUserDefaults removeObjectForKey:@"Theft4DetailedPerformanceCapture"];
 }
 
@@ -2744,10 +2758,10 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
             if ([fm fileExistsAtPath:callerCapture.path]) success = success && Theft4AppendDiagnosticFile(stream,
                 callerCapture, [@"Theft4/startup/frame-captures/" stringByAppendingString:callerCapture.lastPathComponent],
                 &budget, included, skipped);
-            for (NSString *prefix in @[@"perf-frames-", @"perf-system-", @"perf-summary-"]) {
+            for (NSString *prefix in @[@"perf-frames-", @"perf-system-", @"perf-summary-", @"benchmark-"]) {
                 NSString *name = [latestFrameCapture.lastPathComponent
                     stringByReplacingOccurrencesOfString:@"publication-trace-" withString:prefix];
-                if ([prefix isEqualToString:@"perf-summary-"])
+                if ([prefix isEqualToString:@"perf-summary-"] || [prefix isEqualToString:@"benchmark-"])
                     name = [name stringByReplacingOccurrencesOfString:@".csv" withString:@".json"];
                 NSURL *perfCapture = [frameDirectory URLByAppendingPathComponent:name];
                 if ([fm fileExistsAtPath:perfCapture.path]) success = success && Theft4AppendDiagnosticFile(stream,
@@ -2932,6 +2946,10 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
             self->_touchControls.active = self->_sceneActive && self->_showControls.on;
             [self record:self->_showControls.on ? @"ui.touch_controls_shown" : @"ui.touch_controls_hidden"];
         }]];
+    if (!_benchRunning) {
+        [menu addAction:[UIAlertAction actionWithTitle:@"Start 60 s Benchmark" style:UIAlertActionStyleDefault
+            handler:^(__unused UIAlertAction *action) { [self startBenchmark]; }]];
+    }
     [menu addAction:[UIAlertAction actionWithTitle:@"Quit Game · Reopen to Main Menu"
         style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) {
             [self returnToLauncherDuringGame];
@@ -3197,6 +3215,7 @@ static void Theft4AppendDouble(NSMutableData *data, double value) { [data append
     _perfPrepareMs = [NSMutableData new]; _perfEncodeMs = [NSMutableData new]; _perfWaitMs = [NSMutableData new];
     _perfAdmissionMs = [NSMutableData new]; _perfDrawableMs = [NSMutableData new];
     _perfInterpLatencyMs = [NSMutableData new]; _perfInterpGpuMs = [NSMutableData new]; _perfPresentedInterp = 0;
+    _perfRealMs = [NSMutableData new]; _perfLastRealNs = 0;
     _perfLastPresentNs = _perfFirstPresentNs = _perfLatestPresentNs = 0;
     _perfPresented = _perfDropped = _perfFrames = _perfLost = _perfTimeouts = _perfInterpolated = 0;
     _perfFirstCommitNs = _perfLastCommitNs = _perfPeakFootprint = 0;
@@ -3254,6 +3273,14 @@ static void Theft4AppendDouble(NSMutableData *data, double value) { [data append
                 if (!e->gpu_end_ns) { ++_perfDropped; [text appendFormat:@"dropped,%llu,,,,,,,,\n", (unsigned long long)e->sequence]; continue; }
                 ++_perfPresented;
                 if (e->value == 1) ++_perfPresentedInterp;
+                else {
+                    // Real (rendered) frame-to-frame time, excluding generated frames.
+                    if (_perfLastRealNs && e->gpu_end_ns > _perfLastRealNs) {
+                        const double realInterval = (e->gpu_end_ns - _perfLastRealNs) / 1e6;
+                        if (realInterval < 1000.0) Theft4AppendDouble(_perfRealMs, realInterval);
+                    }
+                    if (e->gpu_end_ns > _perfLastRealNs) _perfLastRealNs = e->gpu_end_ns;
+                }
                 if (!_perfFirstPresentNs) _perfFirstPresentNs = e->gpu_end_ns;
                 double interval = -1;
                 if (_perfLastPresentNs && e->gpu_end_ns > _perfLastPresentNs) {
@@ -3296,6 +3323,11 @@ static void Theft4AppendDouble(NSMutableData *data, double value) { [data append
     if (available && available < _perfMinAvailable) _perfMinAvailable = available;
     if (thermal > _perfMaxThermal) _perfMaxThermal = thermal;
     if (thermal >= 0 && thermal < 4) ++_perfThermalCounts[thermal];
+    if (_benchActive) {
+        if (thermal > _benchMaxThermal) _benchMaxThermal = thermal;
+        if (footprint > _benchPeakFootprint) _benchPeakFootprint = footprint;
+        if (available && available < _benchMinAvailable) _benchMinAvailable = available;
+    }
     [_perfSystemRows appendFormat:@"%llu,sample,%lu,%llu,%llu,%ld,%llu\n",
         (unsigned long long)theft4_perf_now_ns(), (unsigned long)_memoryPressureLevel,
         (unsigned long long)footprint, (unsigned long long)available, (long)thermal,
@@ -3343,6 +3375,7 @@ static void Theft4AppendDouble(NSMutableData *data, double value) { [data append
         @"backend_admission_wait": Theft4Distribution(_perfAdmissionMs),
         @"drawable_wait": Theft4Distribution(_perfDrawableMs),
         @"lost_events": @(_perfLost),
+        @"real_frame_time": Theft4Distribution(_perfRealMs),
         @"memory": @{@"peak_footprint_bytes": @(_perfPeakFootprint),
                      @"min_available_bytes": @(_perfMinAvailable == UINT64_MAX ? 0 : _perfMinAvailable),
                      @"pressure_warnings": @(_memoryPressureWarnings), @"pressure_criticals": @(_memoryPressureCriticals)},
@@ -3620,6 +3653,215 @@ static void Theft4AppendDouble(NSMutableData *data, double value) { [data append
     [self presentViewController:menu animated:YES completion:nil];
 }
 
+
+// ---- Theft4-MetalFX benchmark: fixed 60 s window over the running capture ----
+static NSData *Theft4Slice(NSData *data, NSUInteger offsetCount) {
+    const NSUInteger count = data.length / sizeof(double);
+    if (offsetCount >= count) return [NSData data];
+    return [data subdataWithRange:NSMakeRange(offsetCount * sizeof(double), (count - offsetCount) * sizeof(double))];
+}
+static NSInteger Theft4StoredDensityPercent(NSString *percentKey, NSString *legacyKey) {
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    if ([d objectForKey:percentKey]) return [d integerForKey:percentKey];
+    if ([d objectForKey:legacyKey]) { const NSInteger l[] = {35, 60, 80, 100}; return l[MAX(0, MIN(3, [d integerForKey:legacyKey]))]; }
+    return 60;
+}
+static NSInteger Theft4DensityStepDown(NSInteger percent) {
+    const NSInteger steps[] = {5, 15, 35, 60, 80, 100};
+    for (NSInteger i = 5; i > 0; --i) if (percent >= steps[i]) return steps[i - 1];
+    return 5;
+}
+
+- (void)startBenchmark {
+    if (_benchRunning) return;
+    if (!_publicationCaptureActive && ![self beginPublicationCapture]) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BENCHMARK"
+            message:@"The benchmark needs Long Performance Capture, which runs once per launch (up to 5 minutes). Reopen Theft4, turn on BENCHMARK in System, then start it again in game."
+            preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    _benchRunning = YES;
+    const uint64_t rendered = theft4_perf_rendered_total(), generated = theft4_perf_generated_total();
+    const CFTimeInterval now = CACurrentMediaTime();
+    dispatch_async(_publicationCaptureQueue, ^{
+        [self collectPerfStats];
+        self->_benchOffReal = self->_perfRealMs.length / sizeof(double);
+        self->_benchOffPresented = self->_perfPresentedMs.length / sizeof(double);
+        self->_benchOffGpu = self->_perfGpuMs.length / sizeof(double);
+        self->_benchOffPrepare = self->_perfPrepareMs.length / sizeof(double);
+        self->_benchOffWait = self->_perfWaitMs.length / sizeof(double);
+        self->_benchOffDrawable = self->_perfDrawableMs.length / sizeof(double);
+        self->_benchRenderedStart = rendered; self->_benchGeneratedStart = generated;
+        self->_benchStartTime = now;
+        self->_benchStartThermal = NSProcessInfo.processInfo.thermalState;
+        self->_benchMaxThermal = self->_benchStartThermal;
+        self->_benchPeakFootprint = 0; self->_benchMinAvailable = UINT64_MAX;
+        self->_benchPressureStart = self->_memoryPressureWarnings + self->_memoryPressureCriticals;
+        self->_benchActive = YES;
+        [self appendPublicationCaptureText:[NSString stringWithFormat:@"marker,,%llu,,benchmark-start\n",
+            (unsigned long long)(now * 1e9)]];
+    });
+    __weak __typeof__(self) weakSelf = self;
+    _benchTimer = [NSTimer scheduledTimerWithTimeInterval:60 repeats:NO block:^(NSTimer *timer) {
+        [weakSelf finishBenchmark];
+    }];
+    [self record:@"benchmark.started"];
+}
+
+- (void)finishBenchmark {
+    if (!_benchRunning) return;
+    [_benchTimer invalidate]; _benchTimer = nil;
+    if (!_publicationCaptureQueue) { _benchRunning = NO; return; }
+    const uint64_t rendered = theft4_perf_rendered_total(), generated = theft4_perf_generated_total();
+    const CFTimeInterval now = CACurrentMediaTime();
+    // Current saved settings: what the recommendation steps from.
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    const NSInteger traffic = Theft4StoredDensityPercent(@"Theft4TrafficDensityPct", @"Theft4TrafficDensity");
+    const NSInteger peds = Theft4StoredDensityPercent(@"Theft4PedDensityPct", @"Theft4PedDensity");
+    const NSInteger metalfxMode = [defaults integerForKey:@"Theft4MetalFXMode"];
+    const NSInteger metalfxOutput = [defaults integerForKey:@"Theft4MetalFXOutput"];
+    const NSInteger renderHeight = [defaults integerForKey:@"Theft4LabRenderHeight"] ?: 720;
+    const theft4_output_policy output = theft4_metal_get_output_policy();
+    dispatch_async(_publicationCaptureQueue, ^{
+        [self collectPerfStats];
+        self->_benchActive = NO;
+        NSData *real = Theft4Slice(self->_perfRealMs, self->_benchOffReal);
+        NSData *presented = Theft4Slice(self->_perfPresentedMs, self->_benchOffPresented);
+        NSData *gpu = Theft4Slice(self->_perfGpuMs, self->_benchOffGpu);
+        NSData *prepare = Theft4Slice(self->_perfPrepareMs, self->_benchOffPrepare);
+        NSData *wait = Theft4Slice(self->_perfWaitMs, self->_benchOffWait);
+        NSData *drawable = Theft4Slice(self->_perfDrawableMs, self->_benchOffDrawable);
+        const double seconds = MAX(0.001, now - self->_benchStartTime);
+        const double renderedFPS = (rendered - self->_benchRenderedStart) / seconds;
+        const double generatedFPS = (generated - self->_benchGeneratedStart) / seconds;
+        NSDictionary *realDist = Theft4Distribution(real);
+        const double p50 = [realDist[@"p50_ms"] doubleValue], p95 = [realDist[@"p95_ms"] doubleValue],
+            p99 = [realDist[@"p99_ms"] doubleValue];
+        const double gpu50 = Theft4Percentile(gpu, 0.5), wait50 = Theft4Percentile(wait, 0.5),
+            drawable50 = Theft4Percentile(drawable, 0.5), prepare50 = Theft4Percentile(prepare, 0.5);
+        const NSInteger thermal = self->_benchMaxThermal;
+        const NSUInteger pressure = self->_memoryPressureWarnings + self->_memoryPressureCriticals - self->_benchPressureStart;
+
+        // Recommendation, from measured frame times only. Target: steady 30 FPS
+        // (33.3 ms) with p95 under 40 ms and thermal at most Fair.
+        NSString *verdict = @"stable";
+        NSString *bound = @"none";
+        NSInteger newTraffic = traffic, newPeds = peds, newMode = metalfxMode, newOutput = metalfxOutput,
+            newHeight = renderHeight;
+        NSMutableArray<NSString *> *reasons = [NSMutableArray new];
+        const BOOL enoughData = [realDist[@"samples"] unsignedIntegerValue] >= 300;
+        const BOOL slow = p50 > 35.0 || p95 > 40.0;
+        if (!enoughData) {
+            verdict = @"insufficient-data";
+            [reasons addObject:@"Fewer than 300 real frames were measured; stay in gameplay for the full 60 s."];
+        } else if (slow || thermal >= 2) {
+            verdict = @"change";
+            // GPU-bound: command buffers take most of the frame, or the CPU
+            // waits for frame slots / drawables. Otherwise the CPU/simulation.
+            const BOOL gpuBound = gpu50 >= 0.8 * p50 || wait50 > 2.0 || drawable50 > 4.0;
+            bound = gpuBound ? @"gpu" : @"cpu";
+            if (gpuBound) {
+                if (metalfxMode <= 0) { newMode = 3; [reasons addObject:@"GPU-bound: turn on MetalFX Performance (2x)."]; }
+                else if (metalfxMode < 4) { newMode = metalfxMode + 1; [reasons addObject:@"GPU-bound: one MetalFX step faster."]; }
+                else if (renderHeight > 540) { newHeight = 540; [reasons addObject:@"GPU-bound at Ultra Performance: lower Internal Resolution to 540p."]; }
+                if (newMode > 0 && (metalfxOutput == 0 || metalfxOutput > 720) && renderHeight <= 720) {
+                    newOutput = 0; // Match keeps 720p output at 720p
+                }
+            } else {
+                newTraffic = Theft4DensityStepDown(traffic); newPeds = Theft4DensityStepDown(peds);
+                [reasons addObject:[NSString stringWithFormat:@"CPU-bound (GPU %.1f ms of a %.1f ms frame): lower traffic %ld%%→%ld%% and pedestrians %ld%%→%ld%%.",
+                    gpu50, p50, (long)traffic, (long)newTraffic, (long)peds, (long)newPeds]];
+            }
+            if (thermal >= 2) {
+                [reasons addObject:@"Thermal state reached Serious or Critical: the next step down is applied to keep frame times stable, and Lock to 30 FPS is recommended."];
+                if (gpuBound && newMode > 0 && newMode < 4 && newMode == metalfxMode) newMode = metalfxMode + 1;
+                if (!gpuBound && newTraffic == Theft4DensityStepDown(traffic)) { newTraffic = Theft4DensityStepDown(newTraffic); newPeds = Theft4DensityStepDown(newPeds); }
+            }
+        } else {
+            [reasons addObject:@"Frame times are within target (p50 ≤ 35 ms, p95 ≤ 40 ms) and thermal is Nominal or Fair: keep this profile."];
+        }
+        NSDictionary *recommended = @{@"traffic_percent": @(newTraffic), @"ped_percent": @(newPeds),
+            @"metalfx_mode": @(newMode), @"metalfx_output": @(newOutput), @"render_height": @(newHeight)};
+        NSDictionary *result = @{
+            @"schema": @"theft4-metalfx-benchmark/1",
+            @"build": NSBundle.mainBundle.infoDictionary[@"CFBundleVersion"] ?: @"",
+            @"duration_seconds": @(seconds),
+            @"rendered_fps": @(renderedFPS), @"generated_fps": @(generatedFPS),
+            @"presented_fps": @(renderedFPS + generatedFPS),
+            @"real_frame_time": realDist,
+            @"presented_frame_time": Theft4Distribution(presented),
+            @"gpu_command_buffer": Theft4Distribution(gpu),
+            @"cpu_prepare": Theft4Distribution(prepare),
+            @"frame_slot_wait": Theft4Distribution(wait),
+            @"drawable_wait": Theft4Distribution(drawable),
+            @"thermal": @{@"start": @(self->_benchStartThermal), @"max": @(thermal)},
+            @"memory": @{@"peak_footprint_bytes": @(self->_benchPeakFootprint),
+                         @"min_available_bytes": @(self->_benchMinAvailable == UINT64_MAX ? 0 : self->_benchMinAvailable),
+                         @"pressure_events": @(pressure)},
+            @"current": @{@"traffic_percent": @(traffic), @"ped_percent": @(peds), @"metalfx_mode": @(metalfxMode),
+                          @"metalfx_output": @(metalfxOutput), @"render_height": @(renderHeight),
+                          @"render": [NSString stringWithFormat:@"%ux%u", output.render_width, output.render_height],
+                          @"output": [NSString stringWithFormat:@"%ux%u", output.output_width, output.output_height]},
+            @"verdict": verdict, @"bound": bound, @"recommended": recommended, @"reasons": reasons,
+            @"legend": @"metalfx_mode 0 off,1 native,2 quality,3 performance,4 ultra; metalfx_output 0 match; thermal 0 nominal..3 critical"};
+        NSURL *benchURL = [self->_perfSummaryURL.URLByDeletingLastPathComponent URLByAppendingPathComponent:
+            [self->_perfSummaryURL.lastPathComponent stringByReplacingOccurrencesOfString:@"perf-summary-" withString:@"benchmark-"]];
+        NSData *json = [NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
+        [json writeToURL:benchURL atomically:YES];
+        [self appendPublicationCaptureText:[NSString stringWithFormat:@"marker,,%llu,,benchmark-end\n",
+            (unsigned long long)(CACurrentMediaTime() * 1e9)]];
+        [self writePerfFiles];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_benchRunning = NO;
+            [self record:[@"benchmark.finished " stringByAppendingString:verdict]];
+            NSString *summary = [NSString stringWithFormat:
+                @"Rendered %.1f FPS · Generated %.1f FPS\nReal frame time p50 %.1f · p95 %.1f · p99 %.1f ms\nGPU %.1f ms · CPU prepare %.1f ms · slot wait %.1f ms\nThermal max %ld · Peak memory %.0f MB\n\n%@\n\nRecommended: traffic %ld%% · peds %ld%% · MetalFX %@ · output %@ · internal %ldp",
+                renderedFPS, generatedFPS, p50, p95, p99, gpu50, prepare50, wait50, (long)thermal,
+                self->_benchPeakFootprint / 1048576.0, [reasons componentsJoinedByString:@"\n"],
+                (long)newTraffic, (long)newPeds,
+                @[@"Off", @"Native", @"Quality", @"Performance", @"Ultra Perf"][MAX(0, MIN(4, newMode))],
+                newOutput ? [NSString stringWithFormat:@"%ldp", (long)newOutput] : @"Match", (long)newHeight];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:
+                [verdict isEqualToString:@"stable"] ? @"BENCHMARK · STABLE" : [verdict isEqualToString:@"change"] ? @"BENCHMARK · CHANGE SUGGESTED" : @"BENCHMARK · NOT ENOUGH DATA"
+                message:summary preferredStyle:UIAlertControllerStyleAlert];
+            if ([verdict isEqualToString:@"change"]) {
+                [alert addAction:[UIAlertAction actionWithTitle:@"Apply for Next Launch" style:UIAlertActionStyleDefault
+                    handler:^(__unused UIAlertAction *action) {
+                    [self applyBenchmarkProfile:recommended];
+                }]];
+            }
+            [alert addAction:[UIAlertAction actionWithTitle:@"Close" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        });
+    });
+}
+
+- (void)applyBenchmarkProfile:(NSDictionary *)profile {
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    const NSInteger traffic = [profile[@"traffic_percent"] integerValue], peds = [profile[@"ped_percent"] integerValue];
+    [d setInteger:traffic forKey:@"Theft4TrafficDensityPct"];
+    [d setInteger:peds forKey:@"Theft4PedDensityPct"];
+    [d setInteger:traffic >= 100 ? 3 : traffic >= 80 ? 2 : traffic >= 60 ? 1 : 0 forKey:@"Theft4TrafficDensity"];
+    [d setInteger:peds >= 100 ? 3 : peds >= 80 ? 2 : peds >= 60 ? 1 : 0 forKey:@"Theft4PedDensity"];
+    const NSInteger mode = [profile[@"metalfx_mode"] integerValue];
+    [d setInteger:mode forKey:@"Theft4MetalFXMode"];
+    if (mode > 0) {
+        [d setInteger:mode forKey:@"Theft4MetalFXLastMode"];
+        [d setBool:NO forKey:@"Theft4LabFSREnabled"];  // MetalFX and FSR never run together
+    }
+    [d setInteger:[profile[@"metalfx_output"] integerValue] forKey:@"Theft4MetalFXOutput"];
+    [d setInteger:[profile[@"render_height"] integerValue] forKey:@"Theft4LabRenderHeight"];
+    [d synchronize];
+    [self record:@"benchmark.profile_applied"];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"PROFILE SAVED"
+        message:@"Applies at the next game launch. Quit from the game menu, reopen Theft4, turn on BENCHMARK again and rerun at the same spot until it reports Stable."
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
 // Runs on the existing 0.5 s HUD timer only while the overlay is visible.
 - (void)refreshPerfOverlay {
     const uint64_t rendered = theft4_perf_rendered_total();
@@ -3744,6 +3986,7 @@ static void Theft4AppendDouble(NSMutableData *data, double value) { [data append
         rex_frame_scheduling_set_mode(THEFT4_DEFAULT_FRAME_SCHEDULING);
         theft4_apply_performance_defaults();
         setenv("THEFT4_SKIP_INTRO", _bringupOverlay.skipIntro.on ? "1" : "0", 1);
+        if (_benchmarkMode.on) _performanceCapture.on = YES;  // benchmark needs the capture
         if (_performanceCapture.on) [self beginPublicationCapture];
         // Apply the persisted launcher choice before the background runtime
         // reads and validates its native-renderer launch configuration.

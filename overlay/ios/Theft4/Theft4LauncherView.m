@@ -544,6 +544,9 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
     _performanceCapture = [UISwitch new];
     _performanceCapture.onTintColor = Ink(0xB6884D);
     _performanceCapture.accessibilityIdentifier = @"settings.performanceCapture";
+    _benchmarkMode = [UISwitch new];
+    _benchmarkMode.onTintColor = Ink(0xB6884D);
+    _benchmarkMode.accessibilityIdentifier = @"settings.benchmarkMode";
     _downloadLogButton = Action(@"DOWNLOAD LATEST LOG CAPTURE", NO);
     _downloadLogButton.accessibilityIdentifier = @"diagnostics.downloadLatestCapture";
     _exportSavesButton = Action(@"EXPORT SAVES TO FILES", NO);
@@ -559,6 +562,7 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
         [self setting:@"SKIP INTRO VIDEOS" detail:@"Skip opening credits and Rockstar logos at the next launch. Game loading still completes normally." toggle:_skipIntro],
         Copy(@"Optimized for normal play. Development logging and probes stay off. Optional graphs and performance captures are available in the launcher.", 12, NO),
         [self setting:@"LONG PERFORMANCE CAPTURE" detail:@"Off each time the app opens. Enable before Play for up to 5 minutes of timing, without development probes. Turn on the frame-time graph to mark a spike or stop and save; capture also saves when the app goes into the background. Data stays in memory during play." toggle:_performanceCapture],
+        [self setting:@"BENCHMARK (60 S)" detail:@"Off each time the app opens. Turns on Long Performance Capture for this launch. In game, three-finger tap → Start 60 s Benchmark, at the same spot or driving the same route each time. It measures real and presented FPS, frame-time p50/p95/p99, GPU and CPU time, thermal state and memory, then recommends a density / resolution / MetalFX profile you can apply for the next launch. Repeat after applying until it reports Stable." toggle:_benchmarkMode],
         _downloadLogButton,
         Copy(@"SAVE TRANSFER", 13, YES),
         Copy(@"Export a dated backup to Files → On My iPhone/iPad → Theft4 → Save Exports. Import a Theft4 save-export folder only while the game is closed; current saves are backed up first.", 12, NO),
