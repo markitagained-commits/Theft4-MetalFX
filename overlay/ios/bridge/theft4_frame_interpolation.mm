@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <mutex>
 
 namespace {
@@ -45,6 +46,31 @@ bool Invert(const float* m, float* out) {
   if(!std::isfinite(det)||std::fabs(det)<1e-20f)return false;
   for(int i=0;i<16;++i)out[i]=inv[i]/det;
   return true;
+}
+
+// Camera cut between two real frames (cutscene cut, respawn, teleport, camera
+// mode switch). Interpolating across a cut produces a garbage frame, so the
+// caller skips that frame and the interpolator history restarts on the next.
+// clip = M * v with M read column-major from the guest array (as in the
+// shader): clip.w row = m[3],m[7],m[11] = camera forward axis (perspective);
+// the camera centre maps to clip (0,0,c,0), i.e. column 2 of the inverse.
+bool CameraCut(const float* vp,const float* inv_vp,const float* prev_vp) {
+  float prev_inv[16];
+  if(!Invert(prev_vp,prev_inv))return true;
+  const float fl=std::sqrt(vp[3]*vp[3]+vp[7]*vp[7]+vp[11]*vp[11]);
+  const float pl=std::sqrt(prev_vp[3]*prev_vp[3]+prev_vp[7]*prev_vp[7]+prev_vp[11]*prev_vp[11]);
+  if(fl>1e-6f&&pl>1e-6f) {
+    const float c=(vp[3]*prev_vp[3]+vp[7]*prev_vp[7]+vp[11]*prev_vp[11])/(fl*pl);
+    if(!std::isfinite(c)||c<0.866f)return true;  // > 30 degrees in one real frame
+  }
+  if(std::fabs(inv_vp[11])>1e-12f&&std::fabs(prev_inv[11])>1e-12f) {
+    const float dx=inv_vp[8]/inv_vp[11]-prev_inv[8]/prev_inv[11];
+    const float dy=inv_vp[9]/inv_vp[11]-prev_inv[9]/prev_inv[11];
+    const float dz=inv_vp[10]/inv_vp[11]-prev_inv[10]/prev_inv[11];
+    const float d2=dx*dx+dy*dy+dz*dz;
+    if(!std::isfinite(d2)||d2>20.f*20.f)return true;  // > 20 m in one real frame
+  }
+  return false;
 }
 
 // Must match FIConstants in the shader source below.
@@ -129,6 +155,7 @@ struct State {
   uint64_t motion_camera_serial=0;
   Camera previous_camera;
   bool have_previous_camera=false;
+  uint64_t previous_camera_frame=0;  // state.sequence of the frame previous_camera belongs to
   uint64_t last_commit_ns=0;
   double interval_s=1.0/30.0;
   uint64_t sequence=0;
@@ -300,8 +327,18 @@ void EncodeMotion(Frame& frame,id<MTLTexture> scene_depth) {
   if(!pipeline)return;
   MotionConstants k{};
   if(!Invert(camera.vp.data(),k.inv_vp))return;
-  const Camera& prev=state.have_previous_camera?state.previous_camera:camera;
-  std::memcpy(k.prev_vp,prev.vp.data(),64);
+  // Motion is only meaningful against the camera of the immediately preceding
+  // presented frame (the frame whose color becomes prevColorTexture). After a
+  // gap (invalid/stale camera, loading screen without a scene pass, a failed
+  // present) or a camera cut, record this camera and skip interpolation for
+  // this frame instead of reprojecting against an old camera.
+  const uint64_t frame_index=state.sequence+1;  // Present() advances sequence
+  const bool fresh=!state.have_previous_camera||camera.serial!=state.previous_camera.serial;
+  const bool paired=state.have_previous_camera&&fresh&&state.previous_camera_frame==state.sequence&&
+      !CameraCut(camera.vp.data(),k.inv_vp,state.previous_camera.vp.data());
+  if(paired)std::memcpy(k.prev_vp,state.previous_camera.vp.data(),64);
+  if(fresh){state.previous_camera=camera;state.have_previous_camera=true;state.previous_camera_frame=frame_index;}
+  if(!paired)return;
   k.size[0]=float(state.width);k.size[1]=float(state.height);
   k.sign=MotionSign();
   std::string error;
@@ -320,7 +357,6 @@ void EncodeMotion(Frame& frame,id<MTLTexture> scene_depth) {
   if(!encoded)return;
   state.motion_ready=true;state.motion_camera_serial=camera.serial;
   ConfigureCamera(camera);
-  state.previous_camera=camera;state.have_previous_camera=true;
 }
 
 bool Present(id<MTLCommandQueue> queue,CAMetalLayer* layer,id<MTLTexture> color,uint64_t commit_ns,std::string& error) {
@@ -330,7 +366,12 @@ bool Present(id<MTLCommandQueue> queue,CAMetalLayer* layer,id<MTLTexture> color,
     id<MTLLibrary> library=state.library;
     state.copy_drawable=library?FIPipeline(library,@"theft4_fi_copy",layer.pixelFormat,MTLPixelFormatInvalid):nil;
     state.drawable_format=layer.pixelFormat;
-    if(!state.copy_drawable){error="Frame interpolation drawable pipeline failed";return false;}
+    if(!state.copy_drawable) {
+      // Permanent for this layer format: fall back to normal presentation
+      // from the next frame on instead of never presenting again.
+      state.failed=true;status.store(-2);
+      error="Frame interpolation drawable pipeline failed";return false;
+    }
   }
   if(state.last_commit_ns&&commit_ns>state.last_commit_ns) {
     const double interval=double(commit_ns-state.last_commit_ns)/1e9;
@@ -347,10 +388,12 @@ bool Present(id<MTLCommandQueue> queue,CAMetalLayer* layer,id<MTLTexture> color,
   id<MTLTexture> current=state.colors[index];
   id<MTLTexture> previous=state.colors[(index+2)%3];
   const bool interpolate=state.have_previous&&state.motion_ready;
-  const uint64_t sequence=++state.sequence;
   const bool perf=theft4_perf_enabled();
   id<MTLCommandBuffer> cb=[queue commandBuffer];
   if(!cb){error="Frame interpolation command buffer failed";return false;}
+  // Advanced only once this frame's color history is certain to be updated
+  // (EncodeMotion pairs cameras by this counter).
+  const uint64_t sequence=++state.sequence;
   CopyPass(cb,state.copy_rgba16,color,current);
   if(interpolate) {
     auto fi=state.interpolator;
@@ -368,13 +411,21 @@ bool Present(id<MTLCommandQueue> queue,CAMetalLayer* layer,id<MTLTexture> color,
     if(generated) {
       CopyPass(cb,state.copy_drawable,state.interpolated,generated.texture);
       if(perf) {
-        id<MTLCommandBuffer> owner=cb;
+        // GPU times via a completed handler: capturing the command buffer in
+        // the drawable's presented handler would form a retain cycle
+        // (command buffer -> presented drawable -> handler -> command buffer).
+        auto gpu_times=std::make_shared<std::array<std::atomic<uint64_t>,2>>();
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+          (*gpu_times)[0].store(uint64_t(done.GPUStartTime*1e9),std::memory_order_relaxed);
+          (*gpu_times)[1].store(uint64_t(done.GPUEndTime*1e9),std::memory_order_relaxed);
+        }];
         [generated addPresentedHandler:^(id<MTLDrawable> shown) {
           theft4_perf_event p{};p.kind=THEFT4_PERF_EVENT_PRESENTED;p.sequence=uint64_t(shown.drawableID);
           p.gpu_end_ns=shown.presentedTime>0?uint64_t(shown.presentedTime*1e9):0;p.value=1;
           theft4_perf_record(&p);
           theft4_perf_event g{};g.kind=THEFT4_PERF_EVENT_INTERPOLATED;g.sequence=sequence;g.commit_ns=commit_ns;
-          g.gpu_start_ns=uint64_t(owner.GPUStartTime*1e9);g.gpu_end_ns=uint64_t(owner.GPUEndTime*1e9);
+          g.gpu_start_ns=(*gpu_times)[0].load(std::memory_order_relaxed);
+          g.gpu_end_ns=(*gpu_times)[1].load(std::memory_order_relaxed);
           g.value=p.gpu_end_ns>commit_ns?p.gpu_end_ns-commit_ns:0;
           theft4_perf_record(&g);
         }];
