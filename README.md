@@ -14,6 +14,8 @@ On first open the loader appears right away (no setup screen to get past). If yo
 - **Select Game Folder From Files** – pick an already unpacked game folder and it gets moved into place. No leftover copy eating your storage.
 - **Check For Game Files** – finds your game even if it's buried in extra folders, cleans that up, and unpacks any ZIP or ISO you dropped in the game folder.
 
+Supported: ZIP (Stored or Deflate, including ZIP64 for files over 4 GB) and Xbox 360 disc images in XDVDFS/GDF form (full XGD2/XGD3 rips and trimmed XISOs). Not supported: Games on Demand / STFS (CON/LIVE) packages, 7z/RAR, split or password-protected ZIPs, and other ZIP compression methods. ZIPs are checked for free space before extracting; duplicate or unsafe file paths are rejected.
+
 ZIPs and ISOs unpack into a temp folder first and every file is checked (ZIP CRC, ISO re-read) before anything is moved into place. A picked game folder is moved in without a check. ZIPs and ISOs are deleted after extraction, so you need space for the archive and the extracted game at the same time.
 
 ### MetalFX upscaling
