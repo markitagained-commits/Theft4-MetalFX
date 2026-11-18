@@ -264,6 +264,9 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
     _showCPUUsage = [UISwitch new];
     _showFrameTime = [UISwitch new];
     _showFPS = [UISwitch new];
+    _perfOverlay = [UISwitch new];
+    _perfOverlay.onTintColor = Ink(0xB6884D);
+    _perfOverlay.accessibilityIdentifier = @"settings.perfOverlay";
     _showControls = [UISwitch new];
     _anisotropicFiltering = [UISwitch new];
     _enhancedOutput = [UISwitch new];
@@ -521,6 +524,7 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
     _interfacePage = Column(@[
         [self setting:@"CPU / THREAD GRAPH" detail:@"Compact device-core and game-thread activity. Updates once per second; included in long captures while enabled." toggle:_showCPUUsage],
         [self setting:@"FRAME COUNTER" detail:@"Unique game frames in the top-right corner." toggle:_showFPS],
+        [self setting:@"PERFORMANCE OVERLAY" detail:@"Top-left: Rendered (real game frames) and Generated (MetalFX frame generation) as per-second rates and totals since the overlay was turned on, plus presented FPS and real frame time. Generated stays 0 with frame generation off." toggle:_perfOverlay],
         [self setting:@"FRAME-TIME GRAPH" detail:@"Frame delivery against the 33.3 ms target. Double-tap for a short detailed profile. Hold to mark a lag spike or stop and save a long capture." toggle:_showFrameTime],
         [self setting:@"TOUCH CONTROLS" detail:@"Physical controllers continue to work when the overlay is hidden." toggle:_showControls],
         Copy(@"A connected controller can move focus through this launcher. Use the D-pad or left stick to navigate and A to select.", 12, NO)

@@ -151,6 +151,7 @@ class Backend final:public render::FrameBackend {
       } else receipt=adapter_->Submit(plan,error,published);
     }
     if(!receipt)return false;
+    if(present)theft4_perf_count_rendered();
     if(perf) {
       theft4_perf_event wait{};wait.kind=THEFT4_PERF_EVENT_BACKEND_WAIT;wait.sequence=plan->sequence;
       wait.commit_ns=theft4_perf_now_ns();wait.slot_wait_ns=admission_ns;wait.cpu_prepare_ns=drawable_wait_ns;

@@ -12,6 +12,8 @@ os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
 std::atomic<bool> enabled{false};
 std::atomic<uint64_t> timeouts{0};
 thread_local uint64_t submit_begin_ns = 0;
+std::atomic<uint64_t> rendered_total{0};
+std::atomic<uint64_t> generated_total{0};
 }  // namespace
 
 uint64_t theft4_perf_now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
@@ -59,3 +61,8 @@ uint32_t theft4_perf_read(uint64_t* cursor, theft4_perf_event* out, uint32_t cap
   return count;
 }
 uint64_t theft4_perf_slot_timeouts(void) { return timeouts.load(std::memory_order_relaxed); }
+
+void theft4_perf_count_rendered(void) { rendered_total.fetch_add(1, std::memory_order_relaxed); }
+void theft4_perf_count_generated(void) { generated_total.fetch_add(1, std::memory_order_relaxed); }
+uint64_t theft4_perf_rendered_total(void) { return rendered_total.load(std::memory_order_relaxed); }
+uint64_t theft4_perf_generated_total(void) { return generated_total.load(std::memory_order_relaxed); }

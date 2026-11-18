@@ -497,6 +497,12 @@ static BOOL Theft4InstallSaveExport(NSURL *selected, NSURL *support, NSURL *docu
     NSLayoutConstraint *_gameAspectConstraint;
     Theft4LauncherView *_bringupOverlay;
     UILabel *_fpsLabel;
+    // Theft4-MetalFX in-game performance overlay.
+    UISwitch *_perfOverlay;
+    UILabel *_perfOverlayLabel;
+    uint64_t _overlayRenderedBase, _overlayGeneratedBase, _overlayRenderedLast, _overlayGeneratedLast;
+    CFTimeInterval _overlayLastTime;
+    BOOL _overlayBaseSet;
     NSTimer *_fpsTimer;
     dispatch_queue_t _publicationCaptureQueue;
     NSURL *_publicationCaptureURL;
@@ -840,6 +846,7 @@ static void bootEvent(void *context, const char *event) {
     _showCPUUsage = _bringupOverlay.showCPUUsage;
     _showFrameTime = _bringupOverlay.showFrameTime;
     _showFPS = _bringupOverlay.showFPS; _showControls = _bringupOverlay.showControls;
+    _perfOverlay = _bringupOverlay.perfOverlay;
     _anisotropicFiltering = _bringupOverlay.anisotropicFiltering;
     _enhancedOutput = _bringupOverlay.enhancedOutput; _fsrBoost = _bringupOverlay.fsrBoost;
     _motionBlur = _bringupOverlay.motionBlur;
@@ -913,6 +920,8 @@ static void bootEvent(void *context, const char *event) {
         toggle.on = [NSUserDefaults.standardUserDefaults boolForKey:keys[i]];
         [toggle addTarget:self action:@selector(displaySettingsChanged:) forControlEvents:UIControlEventValueChanged];
     }
+    _perfOverlay.on = [NSUserDefaults.standardUserDefaults boolForKey:@"Theft4PerfOverlay"];
+    [_perfOverlay addTarget:self action:@selector(displaySettingsChanged:) forControlEvents:UIControlEventValueChanged];
     [self resetAutomaticCaptureForNewSession];
     [_performanceCapture addTarget:self action:@selector(displaySettingsChanged:)
                  forControlEvents:UIControlEventValueChanged];
@@ -1015,6 +1024,24 @@ static void bootEvent(void *context, const char *event) {
     _fpsLabel.hidden = YES;
     _fpsLabel.accessibilityIdentifier = @"game.fps";
     [self.view addSubview:_fpsLabel];
+    _perfOverlayLabel = [UILabel new];
+    _perfOverlayLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _perfOverlayLabel.numberOfLines = 4;
+    _perfOverlayLabel.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightSemibold];
+    _perfOverlayLabel.textColor = UIColor.whiteColor;
+    _perfOverlayLabel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.58];
+    _perfOverlayLabel.layer.cornerRadius = 7.0;
+    _perfOverlayLabel.layer.masksToBounds = YES;
+    _perfOverlayLabel.hidden = YES;
+    _perfOverlayLabel.userInteractionEnabled = NO;
+    _perfOverlayLabel.accessibilityIdentifier = @"game.perfOverlay";
+    [self.view addSubview:_perfOverlayLabel];
+    [NSLayoutConstraint activateConstraints:@[
+        [_perfOverlayLabel.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:10],
+        [_perfOverlayLabel.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor constant:10],
+        [_perfOverlayLabel.widthAnchor constraintEqualToConstant:250],
+        [_perfOverlayLabel.heightAnchor constraintEqualToConstant:70]
+    ]];
     [NSLayoutConstraint activateConstraints:@[
         [_fpsLabel.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:10],
         [_fpsLabel.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-10],
@@ -2421,6 +2448,9 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     [NSUserDefaults.standardUserDefaults setBool:_enhancedOutput.on
         forKey:@"Theft4EnhancedOutput1080p"];
     _fpsLabel.hidden = !_gamePresentation || _launcherDuringGame || !_showFPS.on;
+    if ([NSUserDefaults.standardUserDefaults boolForKey:@"Theft4PerfOverlay"] != _perfOverlay.on && _perfOverlay.on)
+        _overlayBaseSet = NO;  // totals restart when the overlay is turned on
+    [NSUserDefaults.standardUserDefaults setBool:_perfOverlay.on forKey:@"Theft4PerfOverlay"];
     [NSUserDefaults.standardUserDefaults setBool:_showFrameTime.on forKey:@"Theft4ShowFrameTime"];
     [self updateFrameTimeHUD];
     _touchControls.active = _gamePresentation && !_launcherDuringGame && _showControls.on;
@@ -2955,7 +2985,9 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 - (void)updateFrameTimeHUD {
     const BOOL sampleFPS = _gamePresentation && !_launcherDuringGame && _sceneActive && _showFPS.on;
     theft4_frame_counter_set_enabled(sampleFPS);
-    const BOOL needsTimer = sampleFPS || _publicationCaptureActive;
+    const BOOL showOverlay = _gamePresentation && !_launcherDuringGame && _sceneActive && _perfOverlay.on;
+    _perfOverlayLabel.hidden = !showOverlay;
+    const BOOL needsTimer = sampleFPS || _publicationCaptureActive || showOverlay;
     if (needsTimer && !_fpsTimer) {
         _fpsLastFrames = theft4_frame_counter_published_frames();
         _fpsLastTime = CACurrentMediaTime();
@@ -3588,11 +3620,40 @@ static void Theft4AppendDouble(NSMutableData *data, double value) { [data append
     [self presentViewController:menu animated:YES completion:nil];
 }
 
+// Runs on the existing 0.5 s HUD timer only while the overlay is visible.
+- (void)refreshPerfOverlay {
+    const uint64_t rendered = theft4_perf_rendered_total();
+    const uint64_t generated = theft4_perf_generated_total();
+    const CFTimeInterval now = CACurrentMediaTime();
+    if (!_overlayBaseSet) {
+        _overlayBaseSet = YES;
+        _overlayRenderedBase = _overlayRenderedLast = rendered;
+        _overlayGeneratedBase = _overlayGeneratedLast = generated;
+        _overlayLastTime = now;
+        _perfOverlayLabel.text = @" Rendered    --.- fps\n Generated   --.- fps\n Presented   --.- fps\n Frame       --.- ms";
+        return;
+    }
+    const CFTimeInterval elapsed = now - _overlayLastTime;
+    if (elapsed < 0.4) return;
+    const double renderedFPS = (double)(rendered - _overlayRenderedLast) / elapsed;
+    const double generatedFPS = (double)(generated - _overlayGeneratedLast) / elapsed;
+    const double frameMs = renderedFPS > 0.01 ? 1000.0 / renderedFPS : 0;
+    _perfOverlayLabel.text = [NSString stringWithFormat:
+        @" Rendered  %5.1f fps %8llu\n Generated %5.1f fps %8llu\n Presented %5.1f fps\n Frame     %5.1f ms (real)",
+        renderedFPS, (unsigned long long)(rendered - _overlayRenderedBase),
+        generatedFPS, (unsigned long long)(generated - _overlayGeneratedBase),
+        renderedFPS + generatedFPS, frameMs];
+    _overlayRenderedLast = rendered;
+    _overlayGeneratedLast = generated;
+    _overlayLastTime = now;
+}
+
 - (void)refreshFrameRate {
     // Capture stays in preallocated rings during play; save on explicit stop or
     // background only. Five minutes fits16384 records at the30FPS game cap.
     if (_publicationCaptureActive && CACurrentMediaTime() - _publicationCaptureStartTime >= 300)
         [self stopPublicationCapture];
+    if (!_perfOverlayLabel.hidden) [self refreshPerfOverlay];
     if (_fpsLabel.hidden) return;
     const uint64_t frames = theft4_frame_counter_published_frames();
     const CFTimeInterval now = CACurrentMediaTime();

@@ -9,6 +9,7 @@
 @property(nonatomic, readonly) UIButton *restartButton;
 @property(nonatomic, readonly) UISwitch *showCPUUsage;
 @property(nonatomic, readonly) UISwitch *showFPS;
+@property(nonatomic, readonly) UISwitch *perfOverlay;
 @property(nonatomic, readonly) UISwitch *showFrameTime;
 @property(nonatomic, readonly) UISwitch *showControls;
 @property(nonatomic, readonly) UISwitch *anisotropicFiltering;

@@ -331,6 +331,7 @@ bool Present(id<MTLCommandQueue> queue,CAMetalLayer* layer,id<MTLTexture> color,
         }];
       }
       [cb presentDrawable:generated afterMinimumDuration:half];
+      theft4_perf_count_generated();
     }
   }
   [cb commit];
