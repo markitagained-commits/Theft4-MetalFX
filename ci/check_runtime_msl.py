@@ -13,6 +13,11 @@ for path in sorted(root.rglob("*")):
 print(f"found {len(blocks)} runtime MSL programs")
 
 def find_metal():
+    located = os.environ.get("THEFT4_METAL_DIR")
+    if located:
+        cand = os.path.join(located, "metal")
+        if os.path.exists(cand) and subprocess.run([cand, "--version"], capture_output=True).returncode == 0:
+            return [cand]
     try:
         out = subprocess.run(["xcrun", "-sdk", "iphoneos", "-f", "metal"], capture_output=True, text=True)
         cand = out.stdout.strip()
