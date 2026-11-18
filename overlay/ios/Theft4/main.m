@@ -17,6 +17,8 @@
 #include "theft4_perf_stats.h"
 #import "Theft4DensitySettings.h"
 int theft4_fi_status(void);
+int theft4_fi_reason(void);
+const char *theft4_fi_reason_name(int reason);
 #include "../../glue/rexglue-sdk-main/include/rex/diagnostics/runtime_callers.h"
 #include "../../glue/rexglue-sdk-main/include/rex/diagnostics/frame_scheduling.h"
 #include "theft4_core.h"
@@ -3384,6 +3386,9 @@ static void Theft4AppendDouble(NSMutableData *data, double value) { [data append
         @"frame_interpolation": @{
             @"status": @(theft4_fi_status()),
             @"status_legend": @"0 off, 1 active, -1 device unsupported (supportsDevice: NO), -2 creation failed, -3 on but waiting for depth/camera inputs",
+            @"reason": @(theft4_fi_reason()),
+            @"reason_name": @(theft4_fi_reason_name(theft4_fi_reason()) ?: ""),
+            @"reason_legend": @"Gate of the last real frame: 0 generating with camera motion; 1 off; 2 unsupported device; 3 creation failed; 4 drawable pipeline failed; 5 waiting first frame; 6 no scene depth pass, 7 camera invalid, 8 camera unpaired, 10 depth unsupported, 11 motion encode failed (6-8,10,11 still generate with zero motion); 9 camera cut (frame skipped); 12 no drawable for the generated frame; 13 present unavailable",
             @"interpolated_presented": @(_perfPresentedInterp),
             @"real_presented": @(_perfPresented - _perfPresentedInterp),
             @"generated_fps": @(presentedSeconds > 0 ? _perfPresentedInterp / presentedSeconds : 0),

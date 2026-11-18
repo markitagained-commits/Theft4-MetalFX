@@ -23,6 +23,27 @@ struct Camera {
 std::mutex camera_mutex;
 Camera latest_camera;
 std::atomic<int> status{0};
+std::atomic<int> reason{THEFT4_FI_REASON_OFF};
+
+const char* ReasonName(int r) {
+  switch(r) {
+    case THEFT4_FI_REASON_GENERATING:return "generating";
+    case THEFT4_FI_REASON_OFF:return "off";
+    case THEFT4_FI_REASON_UNSUPPORTED_DEVICE:return "unsupported-device";
+    case THEFT4_FI_REASON_CREATION_FAILED:return "creation-failed";
+    case THEFT4_FI_REASON_DRAWABLE_PIPELINE_FAILED:return "drawable-pipeline-failed";
+    case THEFT4_FI_REASON_WAITING_FIRST_FRAME:return "waiting-first-frame";
+    case THEFT4_FI_REASON_NO_SCENE_DEPTH:return "no-scene-depth-pass(zero-motion fallback)";
+    case THEFT4_FI_REASON_CAMERA_INVALID:return "camera-invalid(zero-motion fallback)";
+    case THEFT4_FI_REASON_CAMERA_UNPAIRED:return "camera-unpaired(zero-motion fallback)";
+    case THEFT4_FI_REASON_CAMERA_CUT:return "camera-cut(frame skipped)";
+    case THEFT4_FI_REASON_DEPTH_UNSUPPORTED:return "scene-depth-unsupported(zero-motion fallback)";
+    case THEFT4_FI_REASON_MOTION_ENCODE_FAILED:return "motion-encode-failed";
+    case THEFT4_FI_REASON_NO_DRAWABLE:return "no-drawable-for-generated-frame";
+    case THEFT4_FI_REASON_PRESENT_UNAVAILABLE:return "present-unavailable";
+    default:return "unknown";
+  }
+}
 
 bool Invert(const float* m, float* out) {
   float inv[16];
@@ -160,6 +181,15 @@ struct State {
   double interval_s=1.0/30.0;
   uint64_t sequence=0;
   bool encoded_last_frame=false;  // interpolator ran for the previous real frame
+  // Per real frame, reset by Present(): EncodeMotion ran / its gate / camera cut.
+  bool motion_attempted=false, motion_from_camera=false, skip_frame=false;
+  int frame_reason=THEFT4_FI_REASON_NO_SCENE_DEPTH;
+  bool camera_configured=false;  // interpolator camera parameters set at least once
+  int last_mode=-1;               // 0 cleared fallback, 1 zero motion + depth, 2 camera motion
+  // Diagnostics (render worker only).
+  int logged_reason=-1;
+  uint32_t reason_changes_logged=0;
+  uint64_t blocked_run=0, generated_total=0;
 };
 State state;
 std::mutex state_mutex;  // render worker only in practice; guards lazy creation
@@ -200,8 +230,9 @@ id<MTLTexture> MakeTexture(id<MTLDevice> device, MTLPixelFormat format, uint32_t
 bool Create(id<MTLDevice> device,uint32_t w,uint32_t h) {
   state=State{};state.device=device;state.width=w;state.height=h;
   if(![MTLFXFrameInterpolatorDescriptor supportsDevice:device]) {
-    state.unsupported=true;status.store(-1);
-    std::fprintf(stderr,"theft4-fi: MTLFXFrameInterpolatorDescriptor supportsDevice: NO\n");
+    state.unsupported=true;status.store(-1);reason.store(THEFT4_FI_REASON_UNSUPPORTED_DEVICE);
+    std::fprintf(stderr,"theft4-fi: MTLFXFrameInterpolatorDescriptor supportsDevice: NO (%s) -> frame generation off\n",
+                 device.name.UTF8String?:"?");
     return false;
   }
   MTLFXFrameInterpolatorDescriptor* d=[MTLFXFrameInterpolatorDescriptor new];
@@ -216,7 +247,7 @@ bool Create(id<MTLDevice> device,uint32_t w,uint32_t h) {
   if(!state.interpolator||!library) {
     std::fprintf(stderr,"theft4-fi: creation failed interpolator=%d library=%d %s\n",
                  state.interpolator!=nil,library!=nil,error.localizedDescription.UTF8String?:"");
-    state.failed=true;status.store(-2);return false;
+    state.failed=true;status.store(-2);reason.store(THEFT4_FI_REASON_CREATION_FAILED);return false;
   }
   state.copy_rgba16=FIPipeline(library,@"theft4_fi_copy",MTLPixelFormatRGBA16Float,MTLPixelFormatInvalid);
   state.motion=FIPipeline(library,@"theft4_fi_motion",MTLPixelFormatRG16Float,MTLPixelFormatDepth32Float);
@@ -236,11 +267,17 @@ bool Create(id<MTLDevice> device,uint32_t w,uint32_t h) {
   bool ok=state.copy_rgba16&&state.motion&&state.depth_always&&state.interpolated&&
           state.motion_texture&&state.depth_texture;
   for(auto& c:state.colors)ok=ok&&c;
-  if(!ok){state.failed=true;status.store(-2);return false;}
+  if(!ok) {
+    std::fprintf(stderr,"theft4-fi: creation failed copy=%d motion=%d depth-state=%d textures=%d\n",
+                 state.copy_rgba16!=nil,state.motion!=nil,state.depth_always!=nil,
+                 state.interpolated&&state.motion_texture&&state.depth_texture);
+    state.failed=true;status.store(-2);reason.store(THEFT4_FI_REASON_CREATION_FAILED);return false;
+  }
   // Drawable copy pipeline is created on first present (needs the layer format).
   state.library=library;
-  std::fprintf(stderr,"theft4-fi: MetalFX frame interpolator ready %ux%u\n",w,h);
-  status.store(-3);
+  std::fprintf(stderr,"theft4-fi: MetalFX frame interpolator ready %ux%u on %s (ms-depth motion %s)\n",w,h,
+               device.name.UTF8String?:"?",state.motion_ms?"yes":"no");
+  status.store(-3);reason.store(THEFT4_FI_REASON_WAITING_FIRST_FRAME);
   return true;
 }
 
@@ -269,6 +306,32 @@ void ConfigureCamera(const Camera& c) {
   auto fi=state.interpolator;
   fi.fieldOfView=fov;fi.aspectRatio=aspect;fi.nearPlane=near_plane;fi.farPlane=far_plane;
   fi.depthReversed=reversed;
+  state.camera_configured=true;
+}
+
+constexpr float kIdentity[16]={1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+
+// One line per gate change (bounded) and a periodic line while no frame is
+// generated, so a device log always names what blocks generation.
+void Report(int r,bool generated) {
+  reason.store(r);
+  if(generated) {
+    if(!state.generated_total++)
+      std::fprintf(stderr,"theft4-fi: first generated frame presented (gate=%s)\n",ReasonName(r));
+    state.blocked_run=0;
+  } else {
+    ++state.blocked_run;
+    if(state.blocked_run==60||state.blocked_run%1800==0)
+      std::fprintf(stderr,"theft4-fi: no generated frame for %llu real frames, gate=%s (generated total %llu)\n",
+                   (unsigned long long)state.blocked_run,ReasonName(r),(unsigned long long)state.generated_total);
+  }
+  if(r!=state.logged_reason&&state.reason_changes_logged<24) {
+    ++state.reason_changes_logged;
+    std::fprintf(stderr,"theft4-fi: gate %s -> %s at real frame %llu\n",
+                 state.logged_reason<0?"start":ReasonName(state.logged_reason),ReasonName(r),
+                 (unsigned long long)state.sequence);
+  }
+  state.logged_reason=r;
 }
 
 void CopyPass(id<MTLCommandBuffer> cb,id<MTLRenderPipelineState> pipeline,id<MTLTexture> src,id<MTLTexture> dst) {
@@ -295,6 +358,11 @@ extern "C" int theft4_fi_status(void) {
   if(!Requested())return 0;
   return status.load();
 }
+extern "C" int theft4_fi_reason(void) {
+  if(!Requested())return THEFT4_FI_REASON_OFF;
+  return reason.load();
+}
+extern "C" const char* theft4_fi_reason_name(int r) { return ReasonName(r); }
 
 namespace theft4::metal::fi {
 namespace { thread_local bool presented_frame=false; }
@@ -311,36 +379,54 @@ bool Active(id<MTLDevice> device,uint32_t w,uint32_t h) {
 void EncodeMotion(Frame& frame,id<MTLTexture> scene_depth) {
   std::lock_guard lock(state_mutex);
   state.motion_ready=false;
-  if(!state.interpolator||!scene_depth)return;
+  if(!state.interpolator)return;
+  state.motion_attempted=true;
+  state.frame_reason=THEFT4_FI_REASON_NO_SCENE_DEPTH;
+  if(!scene_depth)return;
   Camera camera;{std::lock_guard c(camera_mutex);camera=latest_camera;}
-  if(!camera.valid)return;
   // Combined depth/stencil binds directly as depth2d (the depth aspect is
   // sampled). A Depth32Float view of Depth32Float_Stencil8 is not a valid
   // texture-view reinterpretation, so no view is created here.
   id<MTLTexture> depth=scene_depth;
   const MTLPixelFormat depth_format=depth.pixelFormat;
+  state.frame_reason=THEFT4_FI_REASON_DEPTH_UNSUPPORTED;
   if(depth_format!=MTLPixelFormatDepth32Float&&depth_format!=MTLPixelFormatDepth32Float_Stencil8&&
-     depth_format!=MTLPixelFormatDepth16Unorm)return;
+     depth_format!=MTLPixelFormatDepth16Unorm) {
+    static int logged=0;
+    if(logged++<4)std::fprintf(stderr,"theft4-fi: scene depth format %lu unsupported\n",(unsigned long)depth_format);
+    return;
+  }
   const bool multisampled=depth.textureType==MTLTextureType2DMultisample;
-  if(!multisampled&&depth.textureType!=MTLTextureType2D)return;
   id<MTLRenderPipelineState> pipeline=multisampled?state.motion_ms:state.motion;
-  if(!pipeline)return;
+  if((!multisampled&&depth.textureType!=MTLTextureType2D)||!pipeline) {
+    static int logged=0;
+    if(logged++<4)std::fprintf(stderr,"theft4-fi: scene depth type %lu samples %lu unsupported (pipeline %d)\n",
+                               (unsigned long)depth.textureType,(unsigned long)depth.sampleCount,pipeline!=nil);
+    return;
+  }
   MotionConstants k{};
-  if(!Invert(camera.vp.data(),k.inv_vp))return;
-  // Motion is only meaningful against the camera of the immediately preceding
-  // presented frame (the frame whose color becomes prevColorTexture). After a
-  // gap (invalid/stale camera, loading screen without a scene pass, a failed
-  // present) or a camera cut, record this camera and skip interpolation for
-  // this frame instead of reprojecting against an old camera.
-  const uint64_t frame_index=state.sequence+1;  // Present() advances sequence
-  const bool fresh=!state.have_previous_camera||camera.serial!=state.previous_camera.serial;
-  const bool paired=state.have_previous_camera&&fresh&&state.previous_camera_frame==state.sequence&&
-      !CameraCut(camera.vp.data(),k.inv_vp,state.previous_camera.vp.data());
-  if(paired)std::memcpy(k.prev_vp,state.previous_camera.vp.data(),64);
-  if(fresh){state.previous_camera=camera;state.have_previous_camera=true;state.previous_camera_frame=frame_index;}
-  if(!paired)return;
+  bool camera_motion=camera.valid&&Invert(camera.vp.data(),k.inv_vp);
+  int frame_reason=THEFT4_FI_REASON_GENERATING;
+  if(camera_motion) {
+    // Camera motion is only meaningful against the camera of the immediately
+    // preceding presented frame (the frame whose color becomes
+    // prevColorTexture). After a gap (invalid/stale camera, loading screen
+    // without a scene pass, a failed present) this frame still interpolates,
+    // with zero motion; across a camera cut it is skipped.
+    const uint64_t frame_index=state.sequence+1;  // Present() advances sequence
+    const bool fresh=!state.have_previous_camera||camera.serial!=state.previous_camera.serial;
+    const bool adjacent=state.have_previous_camera&&fresh&&state.previous_camera_frame==state.sequence;
+    const bool cut=adjacent&&CameraCut(camera.vp.data(),k.inv_vp,state.previous_camera.vp.data());
+    if(adjacent&&!cut)std::memcpy(k.prev_vp,state.previous_camera.vp.data(),64);
+    if(fresh){state.previous_camera=camera;state.have_previous_camera=true;state.previous_camera_frame=frame_index;}
+    if(cut){state.skip_frame=true;state.frame_reason=THEFT4_FI_REASON_CAMERA_CUT;return;}
+    if(!adjacent){camera_motion=false;frame_reason=THEFT4_FI_REASON_CAMERA_UNPAIRED;}
+  } else frame_reason=THEFT4_FI_REASON_CAMERA_INVALID;
+  // Zero-motion fallback: identity matrices and a zero sign write exactly 0
+  // motion while the scene depth is still copied for the interpolator.
+  if(!camera_motion){std::memcpy(k.inv_vp,kIdentity,64);std::memcpy(k.prev_vp,kIdentity,64);}
   k.size[0]=float(state.width);k.size[1]=float(state.height);
-  k.sign=MotionSign();
+  k.sign=camera_motion?MotionSign():0.f;
   std::string error;
   const bool encoded=frame.EncodeExternal([&](id<MTLCommandBuffer> cb) {
     MTLRenderPassDescriptor* rp=[MTLRenderPassDescriptor renderPassDescriptor];
@@ -354,14 +440,29 @@ void EncodeMotion(Frame& frame,id<MTLTexture> scene_depth) {
     [e setFragmentTexture:depth atIndex:0];[e setFragmentBytes:&k length:sizeof k atIndex:0];
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[e endEncoding];
   },error);
-  if(!encoded)return;
-  state.motion_ready=true;state.motion_camera_serial=camera.serial;
+  if(!encoded) {
+    state.frame_reason=THEFT4_FI_REASON_MOTION_ENCODE_FAILED;
+    static int logged=0;
+    if(logged++<4)std::fprintf(stderr,"theft4-fi: motion encode failed: %s\n",error.c_str());
+    return;
+  }
+  state.motion_ready=true;state.motion_from_camera=camera_motion;state.frame_reason=frame_reason;
+  state.motion_camera_serial=camera.serial;
   ConfigureCamera(camera);
 }
 
 bool Present(id<MTLCommandQueue> queue,CAMetalLayer* layer,id<MTLTexture> color,uint64_t commit_ns,std::string& error) {
   std::lock_guard lock(state_mutex);
-  if(!state.interpolator||!queue||!layer||!color){error="Frame interpolation unavailable";return false;}
+  // Per-frame inputs from EncodeMotion are consumed by this call whatever
+  // happens below.
+  const bool motion_attempted=state.motion_attempted,skip_frame=state.skip_frame;
+  const bool motion_ready=state.motion_ready,motion_from_camera=state.motion_from_camera;
+  const int frame_reason=motion_attempted?state.frame_reason:THEFT4_FI_REASON_NO_SCENE_DEPTH;
+  state.motion_attempted=state.skip_frame=state.motion_ready=state.motion_from_camera=false;
+  if(!state.interpolator||!queue||!layer||!color) {
+    reason.store(THEFT4_FI_REASON_PRESENT_UNAVAILABLE);
+    error="Frame interpolation unavailable";return false;
+  }
   if(!state.copy_drawable||state.drawable_format!=layer.pixelFormat) {
     id<MTLLibrary> library=state.library;
     state.copy_drawable=library?FIPipeline(library,@"theft4_fi_copy",layer.pixelFormat,MTLPixelFormatInvalid):nil;
@@ -369,9 +470,12 @@ bool Present(id<MTLCommandQueue> queue,CAMetalLayer* layer,id<MTLTexture> color,
     if(!state.copy_drawable) {
       // Permanent for this layer format: fall back to normal presentation
       // from the next frame on instead of never presenting again.
-      state.failed=true;status.store(-2);
+      state.failed=true;status.store(-2);reason.store(THEFT4_FI_REASON_DRAWABLE_PIPELINE_FAILED);
       error="Frame interpolation drawable pipeline failed";return false;
     }
+    // Interpolation presents two drawables per real frame, each held for at
+    // least 1/30 s; with fewer than three nextDrawable starves.
+    if(layer.maximumDrawableCount<3)layer.maximumDrawableCount=3;
   }
   if(state.last_commit_ns&&commit_ns>state.last_commit_ns) {
     const double interval=double(commit_ns-state.last_commit_ns)/1e9;
@@ -387,16 +491,34 @@ bool Present(id<MTLCommandQueue> queue,CAMetalLayer* layer,id<MTLTexture> color,
   const uint32_t index=state.color_index;
   id<MTLTexture> current=state.colors[index];
   id<MTLTexture> previous=state.colors[(index+2)%3];
-  const bool interpolate=state.have_previous&&state.motion_ready;
+  // Without usable scene depth this frame (no scene pass, e.g. menus/loading,
+  // an unsupported depth surface, a failed motion encode) interpolate with zero motion and a
+  // far-plane depth instead of silently never generating. Only a camera cut
+  // skips the generated frame.
+  const bool cleared_fallback=state.have_previous&&!skip_frame&&!motion_ready;
+  const bool interpolate=state.have_previous&&!skip_frame&&(motion_ready||cleared_fallback);
+  const int mode=motion_ready?(motion_from_camera?2:1):0;
   const bool perf=theft4_perf_enabled();
   id<MTLCommandBuffer> cb=[queue commandBuffer];
-  if(!cb){error="Frame interpolation command buffer failed";return false;}
+  if(!cb){reason.store(THEFT4_FI_REASON_PRESENT_UNAVAILABLE);error="Frame interpolation command buffer failed";return false;}
   // Advanced only once this frame's color history is certain to be updated
   // (EncodeMotion pairs cameras by this counter).
   const uint64_t sequence=++state.sequence;
   CopyPass(cb,state.copy_rgba16,color,current);
+  bool generated_presented=false;
   if(interpolate) {
     auto fi=state.interpolator;
+    if(cleared_fallback) {
+      if(!state.camera_configured)ConfigureCamera(Camera{});
+      MTLRenderPassDescriptor* rp=[MTLRenderPassDescriptor renderPassDescriptor];
+      rp.colorAttachments[0].texture=state.motion_texture;
+      rp.colorAttachments[0].loadAction=MTLLoadActionClear;rp.colorAttachments[0].storeAction=MTLStoreActionStore;
+      rp.colorAttachments[0].clearColor=MTLClearColorMake(0,0,0,0);
+      rp.depthAttachment.texture=state.depth_texture;
+      rp.depthAttachment.loadAction=MTLLoadActionClear;rp.depthAttachment.storeAction=MTLStoreActionStore;
+      rp.depthAttachment.clearDepth=fi.depthReversed?0.0:1.0;  // far plane
+      [[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
+    }
     fi.colorTexture=current;fi.prevColorTexture=previous;
     fi.depthTexture=state.depth_texture;fi.motionTexture=state.motion_texture;
     fi.outputTexture=state.interpolated;
@@ -404,8 +526,9 @@ bool Present(id<MTLCommandQueue> queue,CAMetalLayer* layer,id<MTLTexture> color,
     fi.jitterOffsetX=0;fi.jitterOffsetY=0;  // no TAA jitter in this renderer
     fi.deltaTime=float(state.interval_s);
     // prevColorTexture must be the colorTexture of the previous encode; when
-    // the previous real frame skipped interpolation, restart history.
-    fi.shouldResetHistory=!state.encoded_last_frame;
+    // the previous real frame skipped interpolation, or the motion source
+    // changed (camera / zero motion / cleared), restart history.
+    fi.shouldResetHistory=!state.encoded_last_frame||mode!=state.last_mode;
     [fi encodeToCommandBuffer:cb];
     id<CAMetalDrawable> generated=[layer nextDrawable];
     if(generated) {
@@ -432,6 +555,7 @@ bool Present(id<MTLCommandQueue> queue,CAMetalLayer* layer,id<MTLTexture> color,
       }
       [cb presentDrawable:generated afterMinimumDuration:half];
       theft4_perf_count_generated();
+      generated_presented=true;
     }
   }
   [cb commit];
@@ -448,9 +572,15 @@ bool Present(id<MTLCommandQueue> queue,CAMetalLayer* layer,id<MTLTexture> color,
     [real presentDrawable:drawable afterMinimumDuration:interpolate?half:kPresentedCapInterval];
   }
   [real commit];
-  state.have_previous=true;state.color_index=(index+1)%3;state.motion_ready=false;
-  state.encoded_last_frame=interpolate;
+  const bool first_frame=!state.have_previous;
+  state.have_previous=true;state.color_index=(index+1)%3;
+  state.encoded_last_frame=interpolate;state.last_mode=interpolate?mode:-1;
   status.store(interpolate?1:-3);
+  int gate=frame_reason;
+  if(first_frame)gate=THEFT4_FI_REASON_WAITING_FIRST_FRAME;
+  else if(interpolate&&!generated_presented)gate=THEFT4_FI_REASON_NO_DRAWABLE;
+  else if(interpolate&&!motion_ready&&gate==THEFT4_FI_REASON_GENERATING)gate=THEFT4_FI_REASON_NO_SCENE_DEPTH;
+  Report(gate,generated_presented);
   return true;
 }
 }  // namespace theft4::metal::fi

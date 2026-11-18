@@ -50,4 +50,22 @@ void theft4_fi_note_camera(const float* view_projection16, const float* projecti
                            int valid, float time_step_seconds);
 // 0 off, 1 active, -1 device unsupported, -2 creation failed, -3 waiting for inputs.
 int theft4_fi_status(void);
+// Which gate decided the last real frame (THEFT4_FI_REASON_*), and its name.
+// The *_FALLBACK reasons still generate frames, with zero motion vectors.
+int theft4_fi_reason(void);
+const char* theft4_fi_reason_name(int reason);
 }
+#define THEFT4_FI_REASON_GENERATING 0                 // generated with camera motion vectors
+#define THEFT4_FI_REASON_OFF 1                        // launcher toggle off at game launch
+#define THEFT4_FI_REASON_UNSUPPORTED_DEVICE 2         // supportsDevice: NO
+#define THEFT4_FI_REASON_CREATION_FAILED 3            // interpolator/library/pipeline/texture creation
+#define THEFT4_FI_REASON_DRAWABLE_PIPELINE_FAILED 4   // copy pipeline for the layer format
+#define THEFT4_FI_REASON_WAITING_FIRST_FRAME 5        // no previous real frame yet
+#define THEFT4_FI_REASON_NO_SCENE_DEPTH 6             // no scene depth pass this frame (fallback)
+#define THEFT4_FI_REASON_CAMERA_INVALID 7             // no valid view-projection (fallback)
+#define THEFT4_FI_REASON_CAMERA_UNPAIRED 8            // camera not from the previous frame (fallback)
+#define THEFT4_FI_REASON_CAMERA_CUT 9                 // camera cut: generated frame skipped
+#define THEFT4_FI_REASON_DEPTH_UNSUPPORTED 10         // scene depth format/type (fallback)
+#define THEFT4_FI_REASON_MOTION_ENCODE_FAILED 11      // motion pass encode failed (fallback)
+#define THEFT4_FI_REASON_NO_DRAWABLE 12               // nextDrawable nil for the generated frame
+#define THEFT4_FI_REASON_PRESENT_UNAVAILABLE 13       // no color/queue/command buffer
