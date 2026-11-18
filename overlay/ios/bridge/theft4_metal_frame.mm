@@ -634,6 +634,8 @@ template<bool Diagnostics> Receipt FrameAdapter::SubmitFrameImpl(const std::shar
     for(size_t slot=0;slot<4;++slot)if(dead&(1u<<slot)){descriptor.colorAttachments[slot].storeAction=MTLStoreActionDontCare;if constexpr(Diagnostics)++avoided_stores;}
     const bool fi_scene_pass=command_index-1==fi_pass;
     if((dead&16u)&&!fi_scene_pass){descriptor.depthAttachment.storeAction=MTLStoreActionDontCare;if constexpr(Diagnostics)++avoided_stores;}
+    // Frame interpolation samples this depth after the pass: it must be stored.
+    if(fi_scene_pass&&descriptor.depthAttachment.texture)descriptor.depthAttachment.storeAction=MTLStoreActionStore;
     if(dead&32u){descriptor.stencilAttachment.storeAction=MTLStoreActionDontCare;if constexpr(Diagnostics)++avoided_stores;}
     if(dead_load&1u){descriptor.colorAttachments[0].loadAction=MTLLoadActionDontCare;if constexpr(Diagnostics)++avoided_loads;}
     if(!frame.BeginOwnedPass(descriptor,error))return {};
