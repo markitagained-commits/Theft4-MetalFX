@@ -121,7 +121,7 @@ bool Requested() {
   return requested;
 }
 
-id<MTLRenderPipelineState> Pipeline(id<MTLLibrary> library, NSString* fragment,
+id<MTLRenderPipelineState> FIPipeline(id<MTLLibrary> library, NSString* fragment,
                                    MTLPixelFormat color, MTLPixelFormat depth) {
   MTLRenderPipelineDescriptor* d=[MTLRenderPipelineDescriptor new];
   d.vertexFunction=[library newFunctionWithName:@"theft4_fi_vs"];
@@ -164,8 +164,8 @@ bool Create(id<MTLDevice> device,uint32_t w,uint32_t h) {
                  state.interpolator!=nil,library!=nil,error.localizedDescription.UTF8String?:"");
     state.failed=true;status.store(-2);return false;
   }
-  state.copy_rgba16=Pipeline(library,@"theft4_fi_copy",MTLPixelFormatRGBA16Float,MTLPixelFormatInvalid);
-  state.motion=Pipeline(library,@"theft4_fi_motion",MTLPixelFormatRG16Float,MTLPixelFormatDepth32Float);
+  state.copy_rgba16=FIPipeline(library,@"theft4_fi_copy",MTLPixelFormatRGBA16Float,MTLPixelFormatInvalid);
+  state.motion=FIPipeline(library,@"theft4_fi_motion",MTLPixelFormatRG16Float,MTLPixelFormatDepth32Float);
   MTLDepthStencilDescriptor* ds=[MTLDepthStencilDescriptor new];
   ds.depthCompareFunction=MTLCompareFunctionAlways;ds.depthWriteEnabled=YES;
   state.depth_always=[device newDepthStencilStateWithDescriptor:ds];
@@ -287,7 +287,7 @@ bool Present(id<MTLCommandQueue> queue,CAMetalLayer* layer,id<MTLTexture> color,
   if(!state.interpolator||!queue||!layer||!color){error="Frame interpolation unavailable";return false;}
   if(!state.copy_drawable||state.drawable_format!=layer.pixelFormat) {
     id<MTLLibrary> library=state.library;
-    state.copy_drawable=library?Pipeline(library,@"theft4_fi_copy",layer.pixelFormat,MTLPixelFormatInvalid):nil;
+    state.copy_drawable=library?FIPipeline(library,@"theft4_fi_copy",layer.pixelFormat,MTLPixelFormatInvalid):nil;
     state.drawable_format=layer.pixelFormat;
     if(!state.copy_drawable){error="Frame interpolation drawable pipeline failed";return false;}
   }
