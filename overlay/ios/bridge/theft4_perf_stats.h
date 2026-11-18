@@ -16,7 +16,8 @@ enum {
   THEFT4_PERF_EVENT_FRAME = 1,      // a direct-Metal command buffer completed
   THEFT4_PERF_EVENT_PRESENTED = 2,  // a drawable reached the display (or was dropped)
   THEFT4_PERF_EVENT_SLOT_TIMEOUT = 3,  // BeginFrame waited 50 ms and gave up
-  THEFT4_PERF_EVENT_INTERPOLATED = 4   // MetalFX frame interpolator produced a frame
+  THEFT4_PERF_EVENT_INTERPOLATED = 4,  // MetalFX interpolated frame shown (value = latency ns)
+  THEFT4_PERF_EVENT_BACKEND_WAIT = 5   // backend admission wait (slot_wait_ns) + drawable wait (cpu_prepare_ns)
 };
 
 typedef struct theft4_perf_event {

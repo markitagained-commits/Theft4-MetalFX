@@ -3,6 +3,7 @@
 #include "theft4_metal_host_shaders.h"
 #include "theft4_upscale_preset.h"
 #include "theft4_perf_stats.h"
+#include "theft4_frame_interpolation.h"
 #import <MetalFX/MetalFX.h>
 #import <Foundation/Foundation.h>
 #include <algorithm>
@@ -139,6 +140,86 @@ struct FrameAdapter::Impl {
     metalfx_constants=bytes;
     patched=*host;patched.constants.source=bytes;
     host_source_override=metalfx_output;
+    return true;
+  }
+  // ---- Theft4-MetalFX visual enhancement (Off by default) ----
+  // One full-screen pass before the final Present: light contrast-adaptive
+  // sharpening (CAS-style, 5 taps) and a mild saturation/contrast curve.
+  // It runs at the Present input size (MetalFX output when MetalFX is on).
+  const bool enhance_enabled=[NSUserDefaults.standardUserDefaults boolForKey:@"Theft4VisualEnhancement"];
+  bool enhance_failed=false;
+  id<MTLRenderPipelineState> enhance_pipeline=nil;
+  id<MTLTexture> enhance_output=nil;
+  bool PrepareEnhance(const render::Pass& pass,Frame& frame,bool metalfx_done,render::HostDraw& patched,std::string& error) {
+    if(!enhance_enabled||enhance_failed||pass.commands.size()!=1)return false;
+    const auto* host=render::GetHostDraw(pass.commands.front());
+    if(!host||host->program!=render::HostProgram::Present||!host->fetches[0].produced)return false;
+    id<MTLTexture> input=metalfx_done?metalfx_output:nil;
+    if(!input){std::string local;input=SampledView(*host->fetches[0].produced,local);}
+    if(!input||input.textureType!=MTLTextureType2D||input.sampleCount!=1)return false;
+    id<MTLDevice> device=renderer.Device();
+    if(!enhance_pipeline) {
+      static const char* source=R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+struct EV { float4 p [[position]]; };
+vertex EV theft4_enhance_vs(uint id [[vertex_id]]) {
+  float2 uv = float2((id << 1) & 2, id & 2);
+  EV o; o.p = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0); return o;
+}
+fragment half4 theft4_enhance_fs(EV in [[stage_in]], texture2d<half> src [[texture(0)]]) {
+  const int2 m = int2(src.get_width() - 1, src.get_height() - 1);
+  const int2 c = min(int2(in.p.xy), m);
+  half4 e = src.read(uint2(c));
+  half3 b = src.read(uint2(clamp(c + int2(0,-1), int2(0), m))).rgb;
+  half3 d = src.read(uint2(clamp(c + int2(-1,0), int2(0), m))).rgb;
+  half3 f = src.read(uint2(clamp(c + int2(1,0), int2(0), m))).rgb;
+  half3 h = src.read(uint2(clamp(c + int2(0,1), int2(0), m))).rgb;
+  // Contrast-adaptive sharpening (AMD CAS idea, light strength): less
+  // sharpening where local contrast is already high, so edges do not ring.
+  half3 mn = saturate(min(min(min(d, e.rgb), min(f, b)), h));
+  half3 mx = saturate(max(max(max(d, e.rgb), max(f, b)), h));
+  half3 amp = sqrt(saturate(min(mn, 2.0h - mx) / max(mx, half3(1e-3h))));
+  half3 w = amp * half3(-0.125h * 0.6h);
+  half3 color = ((b + d + f + h) * w + e.rgb) / (1.0h + 4.0h * w);
+  color = max(color, half3(0.0h));
+  // Mild saturation (+8%) and contrast S-curve (15% toward smoothstep).
+  half luma = dot(color, half3(0.2126h, 0.7152h, 0.0722h));
+  color = max(mix(half3(luma), color, 1.08h), half3(0.0h));
+  half3 s = saturate(color);
+  color = mix(color, s * s * (3.0h - 2.0h * s), 0.15h);
+  return half4(color, e.a);
+}
+)MSL";
+      NSError* e=nil;
+      id<MTLLibrary> library=[device newLibraryWithSource:@(source) options:nil error:&e];
+      MTLRenderPipelineDescriptor* d=[MTLRenderPipelineDescriptor new];
+      d.vertexFunction=[library newFunctionWithName:@"theft4_enhance_vs"];
+      d.fragmentFunction=[library newFunctionWithName:@"theft4_enhance_fs"];
+      d.colorAttachments[0].pixelFormat=MTLPixelFormatRGBA16Float;
+      enhance_pipeline=library?[device newRenderPipelineStateWithDescriptor:d error:&e]:nil;
+      if(!enhance_pipeline){enhance_failed=true;
+        std::fprintf(stderr,"theft4-enhance: pipeline failed: %s\n",e.localizedDescription.UTF8String?:"");return false;}
+    }
+    if(!enhance_output||enhance_output.width!=input.width||enhance_output.height!=input.height) {
+      auto t=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+          width:input.width height:input.height mipmapped:NO];
+      t.storageMode=MTLStorageModePrivate;t.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;
+      enhance_output=[device newTextureWithDescriptor:t];
+      if(!enhance_output){enhance_failed=true;return false;}
+      enhance_output.label=@"Theft4 Visual Enhancement";
+    }
+    id<MTLTexture> output=enhance_output;id<MTLRenderPipelineState> pipeline=enhance_pipeline;
+    if(!frame.EncodeExternal([&](id<MTLCommandBuffer> cb) {
+      MTLRenderPassDescriptor* rp=[MTLRenderPassDescriptor renderPassDescriptor];
+      rp.colorAttachments[0].texture=output;rp.colorAttachments[0].loadAction=MTLLoadActionDontCare;
+      rp.colorAttachments[0].storeAction=MTLStoreActionStore;
+      auto e=[cb renderCommandEncoderWithDescriptor:rp];
+      [e setRenderPipelineState:pipeline];[e setFragmentTexture:input atIndex:0];
+      [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[e endEncoding];
+    },error))return false;
+    if(!metalfx_done)patched=*host;
+    host_source_override=enhance_output;
     return true;
   }
   explicit Impl(Renderer& r,size_t maximum,size_t budget,bool reuse):renderer(r),
@@ -486,6 +567,24 @@ template<bool Diagnostics> Receipt FrameAdapter::SubmitFrameImpl(const std::shar
     }
     frame.ProfilePasses(mapping.size(),mapping);
   }
+  // Theft4-MetalFX frame interpolation: pick the scene pass (most game draws
+  // with a single-sample depth attachment); its depth is kept and turned into
+  // interpolator depth + camera motion vectors right after the pass.
+  size_t fi_pass=size_t(-1);
+  if(fi::PresentedFrameMarked()&&plan->output) {
+    const auto* out=render::FindSurface(*plan,plan->output->surface);
+    if(out&&fi::Active(impl_->renderer.Device(),out->width,out->height)) {
+      size_t best=0,index=0;
+      for(const auto& command:plan->commands) {
+        const auto here=index++;
+        const auto* pass=std::get_if<render::Pass>(&command);if(!pass||!pass->depth)continue;
+        const auto* depth_surface=render::FindSurface(*plan,pass->depth->view.surface);
+        if(!depth_surface||depth_surface->samples!=1||depth_surface->kind!=render::ImageKind::Texture2D)continue;
+        size_t draws=0;for(const auto& c:pass->commands)if(std::holds_alternative<render::FrameDraw>(c))++draws;
+        if(draws>best){best=draws;fi_pass=here;}
+      }
+    }
+  }
   const auto prepared_at=clock_now();
   size_t preparation_errors=0;std::string first_preparation_error;
   const auto failed_preparation=[&](uint64_t vertex,uint64_t fragment) {
@@ -526,11 +625,15 @@ template<bool Diagnostics> Receipt FrameAdapter::SubmitFrameImpl(const std::shar
     }
     render::HostDraw metalfx_present;
     impl_->host_source_override=nil;
-    const bool metalfx=impl_->PrepareMetalFX(pass,frame,metalfx_present,error);
-    if(!metalfx&&!error.empty())return {};
+    const bool upscaled=impl_->PrepareMetalFX(pass,frame,metalfx_present,error);
+    if(!upscaled&&!error.empty())return {};
+    const bool enhanced=impl_->PrepareEnhance(pass,frame,upscaled,metalfx_present,error);
+    if(!enhanced&&!error.empty())return {};
+    const bool metalfx=upscaled||enhanced;
     auto descriptor=impl_->Pass(pass,error);if(!descriptor)return {};
     for(size_t slot=0;slot<4;++slot)if(dead&(1u<<slot)){descriptor.colorAttachments[slot].storeAction=MTLStoreActionDontCare;if constexpr(Diagnostics)++avoided_stores;}
-    if(dead&16u){descriptor.depthAttachment.storeAction=MTLStoreActionDontCare;if constexpr(Diagnostics)++avoided_stores;}
+    const bool fi_scene_pass=command_index-1==fi_pass;
+    if((dead&16u)&&!fi_scene_pass){descriptor.depthAttachment.storeAction=MTLStoreActionDontCare;if constexpr(Diagnostics)++avoided_stores;}
     if(dead&32u){descriptor.stencilAttachment.storeAction=MTLStoreActionDontCare;if constexpr(Diagnostics)++avoided_stores;}
     if(dead_load&1u){descriptor.colorAttachments[0].loadAction=MTLLoadActionDontCare;if constexpr(Diagnostics)++avoided_loads;}
     if(!frame.BeginOwnedPass(descriptor,error))return {};
@@ -569,6 +672,10 @@ template<bool Diagnostics> Receipt FrameAdapter::SubmitFrameImpl(const std::shar
       if(!frame.Encode(draw,error))return {};
     }
     if(!frame.EndPass(error))return {};
+    if(fi_scene_pass) {
+      std::string depth_error;
+      if(auto depth=impl_->View(pass.depth->view,depth_error))fi::EncodeMotion(frame,depth);
+    }
     impl_->host_source_override=nil;
   }
   if(preparation_errors) {

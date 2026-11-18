@@ -8,6 +8,7 @@
 #import <MetalFX/MetalFX.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include <array>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -127,6 +128,9 @@ class Frame {
   // Theft4-MetalFX: encode a MetalFX spatial upscale between render passes.
   bool EncodeSpatialUpscale(id<MTLFXSpatialScaler> scaler,id<MTLTexture> input,id<MTLTexture> output,
                             NSUInteger content_width,NSUInteger content_height,std::string& error);
+  // Theft4-MetalFX: encode extra work (frame-interpolation inputs) between
+  // passes into this frame's command buffer. No pass may be open.
+  bool EncodeExternal(const std::function<void(id<MTLCommandBuffer>)>& encode,std::string& error);
   EncoderStats Stats() const;
   bool EndPass(std::string& error);
   bool Present(id<CAMetalDrawable> drawable, std::string& error);
@@ -181,6 +185,8 @@ class Renderer {
   size_t PreparedClearCount() const;
   PipelineCompilationStats CompilationStats() const;
   Frame BeginFrame(std::string& error);
+  // Theft4-MetalFX: the queue frames commit on (frame interpolation presents).
+  id<MTLCommandQueue> Queue() const;
   // Readback is for validation/capture, never part of the normal draw path.
   std::vector<uint8_t> ReadRGBA8(id<MTLTexture> texture, std::string& error,
                                NSUInteger level = 0, NSUInteger slice = 0,

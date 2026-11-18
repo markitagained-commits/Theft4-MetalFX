@@ -31,16 +31,17 @@ Launcher → Graphics → turn on **METALFX UPSCALING**, then pick a **METALFX M
 ### Traffic and pedestrians
 Fewer cars and people means less work for the CPU, which is usually what holds phones back.
 
-Launcher → Graphics → **TRAFFIC DENSITY** and **PEDESTRIAN DENSITY**
+Launcher → Graphics → **TRAFFIC DENSITY** and **PEDESTRIAN DENSITY**: 5%, 15%, 35%, 60% (default), 80%, 100%.
 
-| Setting | Amount |
-|---|---|
-| Low | 35% |
-| Medium (default) | 60% |
-| High | 80% |
-| Stock | 100% |
+These scale GTA IV's own population multipliers (random cars, parked cars, ambient and scenario pedestrians), which the game's spawners read, so fewer cars and people are actually created and simulated, not just hidden. Missions that clear the streets still work (zero is left alone). Settings kick in next time you launch the game. Long Performance Capture records the multipliers actually written.
 
-Missions that clear the streets still work. Settings kick in next time you launch the game.
+### MetalFX output, frame generation, enhancement
+- **METALFX OUTPUT** (in the MetalFX mode row): Match / 720p / 1080p / 1440p. Match follows Internal Resolution; 720p now stays 720p (older builds bumped it to 1080p).
+- **METALFX FRAME GENERATION** (Off by default, experimental): Apple MetalFX frame interpolation. Uses scene depth plus camera motion vectors made from the game's camera matrices. Cars and people only carry camera motion, so expect artifacts on them and on the HUD, and about half a frame of extra latency.
+- **VISUAL ENHANCEMENT** (Off by default): light contrast-adaptive sharpening plus a mild color and contrast curve in one small pass.
+
+### Performance capture
+System → **LONG PERFORMANCE CAPTURE** now also writes `perf-frames-*.csv`, `perf-system-*.csv` and `perf-summary-*.json`: presented FPS and frame-time p50/p95/p99 (from real display times), CPU prepare/encode time, frame-slot and drawable waits, GPU time per command buffer, memory footprint and pressure, thermal state, and frame-generation stats. Download Latest Log Capture includes them.
 
 ## Best settings for FPS
 - Frame Speed preset + MetalFX Performance + Traffic and Pedestrians on Low or Medium

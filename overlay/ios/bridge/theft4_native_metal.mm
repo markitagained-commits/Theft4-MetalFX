@@ -775,6 +775,13 @@ bool Frame::EncodeSpatialUpscale(id<MTLFXSpatialScaler> scaler,id<MTLTexture> in
   [scaler encodeToCommandBuffer:impl_->buffer];
   return true;
 }
+bool Frame::EncodeExternal(const std::function<void(id<MTLCommandBuffer>)>& encode,std::string& error) {
+  if(!*this||impl_->encoder||!encode)return Error(error,"Invalid external encode transition");
+  if(impl_->blit){[impl_->blit endEncoding];impl_->blit=nil;}
+  encode(impl_->buffer);
+  return true;
+}
+id<MTLCommandQueue> Renderer::Queue() const { return impl_ ? impl_->queue : nil; }
 bool Frame::Present(id<CAMetalDrawable> drawable, std::string& error) {
   if (!*this || impl_->encoder || impl_->presented || !drawable ||
       drawable.texture != impl_->stored_color)

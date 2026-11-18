@@ -15,6 +15,7 @@
 #include <mach/mach.h>
 #include <os/proc.h>
 #include "theft4_perf_stats.h"
+int theft4_fi_status(void);
 #include "../../glue/rexglue-sdk-main/include/rex/diagnostics/runtime_callers.h"
 #include "../../glue/rexglue-sdk-main/include/rex/diagnostics/frame_scheduling.h"
 #include "theft4_core.h"
@@ -542,6 +543,8 @@ static BOOL Theft4InstallSaveExport(NSURL *selected, NSURL *support, NSURL *docu
     NSUInteger _perfBytes;
     BOOL _perfFull;
     NSMutableData *_perfPresentedMs, *_perfGpuMs, *_perfPrepareMs, *_perfEncodeMs, *_perfWaitMs;
+    NSMutableData *_perfAdmissionMs, *_perfDrawableMs, *_perfInterpLatencyMs, *_perfInterpGpuMs;
+    uint64_t _perfPresentedInterp;
     uint64_t _perfLastPresentNs, _perfFirstPresentNs, _perfLatestPresentNs;
     uint64_t _perfPresented, _perfDropped, _perfFrames, _perfLost, _perfTimeouts, _perfInterpolated;
     uint64_t _perfFirstCommitNs, _perfLastCommitNs, _perfPeakFootprint, _perfMinAvailable;
@@ -3160,6 +3163,8 @@ static void Theft4AppendDouble(NSMutableData *data, double value) { [data append
     _perfBytes = 0; _perfFull = NO;
     _perfPresentedMs = [NSMutableData new]; _perfGpuMs = [NSMutableData new];
     _perfPrepareMs = [NSMutableData new]; _perfEncodeMs = [NSMutableData new]; _perfWaitMs = [NSMutableData new];
+    _perfAdmissionMs = [NSMutableData new]; _perfDrawableMs = [NSMutableData new];
+    _perfInterpLatencyMs = [NSMutableData new]; _perfInterpGpuMs = [NSMutableData new]; _perfPresentedInterp = 0;
     _perfLastPresentNs = _perfFirstPresentNs = _perfLatestPresentNs = 0;
     _perfPresented = _perfDropped = _perfFrames = _perfLost = _perfTimeouts = _perfInterpolated = 0;
     _perfFirstCommitNs = _perfLastCommitNs = _perfPeakFootprint = 0;
@@ -3216,6 +3221,7 @@ static void Theft4AppendDouble(NSMutableData *data, double value) { [data append
             } else if (e->kind == THEFT4_PERF_EVENT_PRESENTED) {
                 if (!e->gpu_end_ns) { ++_perfDropped; [text appendFormat:@"dropped,%llu,,,,,,,,\n", (unsigned long long)e->sequence]; continue; }
                 ++_perfPresented;
+                if (e->value == 1) ++_perfPresentedInterp;
                 if (!_perfFirstPresentNs) _perfFirstPresentNs = e->gpu_end_ns;
                 double interval = -1;
                 if (_perfLastPresentNs && e->gpu_end_ns > _perfLastPresentNs) {
@@ -3225,13 +3231,20 @@ static void Theft4AppendDouble(NSMutableData *data, double value) { [data append
                 }
                 if (e->gpu_end_ns > _perfLastPresentNs) _perfLastPresentNs = e->gpu_end_ns;
                 _perfLatestPresentNs = _perfLastPresentNs;
-                [text appendFormat:@"presented,%llu,%llu,,,,%.3f,,,\n", (unsigned long long)e->sequence,
-                    (unsigned long long)e->gpu_end_ns, interval];
+                [text appendFormat:@"%@,%llu,%llu,,,,%.3f,,,\n", e->value == 1 ? @"presented-interpolated" : @"presented",
+                    (unsigned long long)e->sequence, (unsigned long long)e->gpu_end_ns, interval];
             } else if (e->kind == THEFT4_PERF_EVENT_SLOT_TIMEOUT) {
                 ++_perfTimeouts;
                 [text appendFormat:@"slot-timeout,,,%.3f,,,,,,\n", e->slot_wait_ns / 1e6];
+            } else if (e->kind == THEFT4_PERF_EVENT_BACKEND_WAIT) {
+                Theft4AppendDouble(_perfAdmissionMs, e->slot_wait_ns / 1e6);
+                if (e->value) Theft4AppendDouble(_perfDrawableMs, e->cpu_prepare_ns / 1e6);
+                [text appendFormat:@"backend-wait,%llu,%llu,%.3f,%.3f,,,,,%llu\n", (unsigned long long)e->sequence,
+                    (unsigned long long)e->commit_ns, e->slot_wait_ns / 1e6, e->cpu_prepare_ns / 1e6, (unsigned long long)e->value];
             } else if (e->kind == THEFT4_PERF_EVENT_INTERPOLATED) {
                 ++_perfInterpolated;
+                if (e->value) Theft4AppendDouble(_perfInterpLatencyMs, e->value / 1e6);
+                if (e->gpu_end_ns > e->gpu_start_ns && e->gpu_start_ns) Theft4AppendDouble(_perfInterpGpuMs, (e->gpu_end_ns - e->gpu_start_ns) / 1e6);
                 [text appendFormat:@"interpolated,%llu,%llu,,,,,,,%llu\n", (unsigned long long)e->sequence,
                     (unsigned long long)e->commit_ns, (unsigned long long)e->value];
             }
@@ -3260,7 +3273,7 @@ static void Theft4AppendDouble(NSMutableData *data, double value) { [data append
 // Export queue only. Rewrites the three files with everything collected so far.
 - (void)writePerfFiles {
     if (!_perfRows || !_perfFramesURL) return;
-    NSString *frames = [@"# Theft4-MetalFX frame statistics. times ns (uptime clock) or ms; frame=direct-Metal command buffer (slot_wait=Renderer::BeginFrame semaphore wait, 3 slots, 50 ms limit; cpu_prepare=adapter submit start->commit; cpu_encode=BeginFrame->commit; gpu=MTLCommandBuffer GPUEndTime-GPUStartTime, -1 unavailable); presented=MTLDrawable presentedTime (interval_ms to previous presented); dropped=drawable never shown\nkind,sequence,time_ns,slot_wait_ms,cpu_prepare_ms,cpu_encode_ms,gpu_or_interval_ms,gpu_start_ns,gpu_end_ns,presented_or_latency\n" stringByAppendingString:_perfRows];
+    NSString *frames = [@"# Theft4-MetalFX frame statistics. times ns (uptime clock) or ms; frame=direct-Metal command buffer (slot_wait=Renderer::BeginFrame semaphore wait, 3 slots, 50 ms limit; cpu_prepare=adapter submit start->commit; cpu_encode=BeginFrame->commit; gpu=MTLCommandBuffer GPUEndTime-GPUStartTime, -1 unavailable); presented/presented-interpolated=MTLDrawable presentedTime (interval_ms to previous presented); dropped=drawable never shown; backend-wait: slot_wait_ms=admission wait for in-flight frames, cpu_prepare_ms=drawable wait; interpolated: last column=latency ns real-frame commit->interpolated frame on screen\nkind,sequence,time_ns,slot_wait_ms,cpu_prepare_ms,cpu_encode_ms,gpu_or_interval_ms,gpu_start_ns,gpu_end_ns,presented_or_latency\n" stringByAppendingString:_perfRows];
     [frames writeToURL:_perfFramesURL atomically:YES encoding:NSUTF8StringEncoding error:nil];
     NSString *system = [@"# thermal 0 nominal 1 fair 2 serious 3 critical; memory_pressure dispatch flags 1 normal 2 warn 4 critical\ntime_ns,kind,memory_pressure,footprint_bytes,available_bytes,thermal_state,published_frames\n" stringByAppendingString:_perfSystemRows];
     [system writeToURL:_perfSystemURL atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -3286,7 +3299,17 @@ static void Theft4AppendDouble(NSMutableData *data, double value) { [data append
         @"cpu_encode": Theft4Distribution(_perfEncodeMs),
         @"frame_slot_wait": [Theft4Distribution(_perfWaitMs) mutableCopy],
         @"frame_slot_timeouts": @(_perfTimeouts),
-        @"interpolated_frames": @(_perfInterpolated),
+        @"frame_interpolation": @{
+            @"status": @(theft4_fi_status()),
+            @"status_legend": @"0 off, 1 active, -1 device unsupported (supportsDevice: NO), -2 creation failed, -3 on but waiting for depth/camera inputs",
+            @"interpolated_presented": @(_perfPresentedInterp),
+            @"real_presented": @(_perfPresented - _perfPresentedInterp),
+            @"generated_fps": @(presentedSeconds > 0 ? _perfPresentedInterp / presentedSeconds : 0),
+            @"real_presented_fps": @(presentedSeconds > 0 ? (_perfPresented - _perfPresentedInterp) / presentedSeconds : 0),
+            @"latency_commit_to_interpolated_display": Theft4Distribution(_perfInterpLatencyMs),
+            @"interpolation_command_buffer_gpu": Theft4Distribution(_perfInterpGpuMs)},
+        @"backend_admission_wait": Theft4Distribution(_perfAdmissionMs),
+        @"drawable_wait": Theft4Distribution(_perfDrawableMs),
         @"lost_events": @(_perfLost),
         @"memory": @{@"peak_footprint_bytes": @(_perfPeakFootprint),
                      @"min_available_bytes": @(_perfMinAvailable == UINT64_MAX ? 0 : _perfMinAvailable),

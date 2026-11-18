@@ -75,6 +75,7 @@ jobs:
       - name: Apply MetalFX overlay
         run: |
           cp -R overlay/. "$RUNNER_TEMP/Theft4/"
+          python3 ci/patches/apply_patches.py "$RUNNER_TEMP/Theft4"
           cd "$RUNNER_TEMP/Theft4"
           git status --short
 

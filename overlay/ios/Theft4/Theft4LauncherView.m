@@ -126,6 +126,8 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
     UIStackView *_play, *_graphics, *_interfacePage, *_system, *_mods;
     UIView *_metalfxModeRow;
     UISegmentedControl *_metalfxOutput;
+    UISwitch *_frameGeneration;
+    UISwitch *_visualEnhancement;
     UILabel *_playHeadline, *_playIntro, *_playSaveNote;
     NSArray<UIButton *> *_tabs;
     NSArray<UIView *> *_pages;
@@ -383,12 +385,34 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
             outputLabel, _metalfxOutput,
             Copy(@"Output size MetalFX upscales into. Match uses the Internal Resolution output (720p stays 720p). 720p / 1080p / 1440p force that output; the render size is output ÷ mode ratio (minimum 640×360).", 12, NO)], 7);
         _metalfxModeRow.hidden = !_metalfxUpscaling.on;
+        // Theft4-MetalFX: Apple MetalFX frame interpolation and the light
+        // enhancement pass. Both Off by default; both apply at next launch.
+        _frameGeneration = [UISwitch new];
+        _frameGeneration.onTintColor = Ink(0x35CDD1);
+        _frameGeneration.accessibilityIdentifier = @"settings.metalfxFrameGeneration";
+        _frameGeneration.on = [NSUserDefaults.standardUserDefaults boolForKey:@"Theft4MetalFXFrameInterpolation"];
+        [_frameGeneration addTarget:self action:@selector(frameGenerationChanged:)
+            forControlEvents:UIControlEventValueChanged];
+        _visualEnhancement = [UISwitch new];
+        _visualEnhancement.onTintColor = Ink(0x35CDD1);
+        _visualEnhancement.accessibilityIdentifier = @"settings.visualEnhancement";
+        _visualEnhancement.on = [NSUserDefaults.standardUserDefaults boolForKey:@"Theft4VisualEnhancement"];
+        [_visualEnhancement addTarget:self action:@selector(visualEnhancementChanged:)
+            forControlEvents:UIControlEventValueChanged];
         [graphicsRows addObjectsFromArray:@[
             [self setting:@"METALFX UPSCALING"
                    detail:@"Apple MetalFX upscaler built for iPhone GPUs. Turning it on turns FSR off. Off leaves the settings above unchanged."
                    toggle:_metalfxUpscaling],
             _metalfxModeRow,
             _resolutionSummary
+        ]];
+        [graphicsRows addObjectsFromArray:@[
+            [self setting:@"METALFX FRAME GENERATION"
+                   detail:@"Experimental. Apple MetalFX frame interpolation inserts a generated frame between real frames, using scene depth and camera motion vectors. Cars and people only carry camera motion, so expect some artifacts on them and the HUD. Adds about half a frame of latency. Needs iOS 26 and a supported GPU; falls back to normal presentation if unsupported. Applies at the next game launch."
+                   toggle:_frameGeneration],
+            [self setting:@"VISUAL ENHANCEMENT"
+                   detail:@"Light contrast-adaptive sharpening plus a mild color and contrast curve, in one small pass before the final present (after MetalFX when it is on). Compare GPU ms in Long Performance Capture with it on and off. Applies at the next game launch."
+                   toggle:_visualEnhancement]
         ]];
         _frameSpeedButton = Action(@"FRAME SPEED", NO);
         _frameSpeedButton.accessibilityIdentifier = @"settings.frameSpeed";
@@ -1025,6 +1049,11 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
     _configuration.text = [NSString stringWithFormat:@"720p / %@ / %@", shadow, distance];
 }
 
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    // Theft4-MetalFX: any touch in the launcher wakes an idle-paused city.
+    if (_active && !_retired) [_city noteInteraction];
+    return [super hitTest:point withEvent:event];
+}
 - (void)motionChanged:(NSNotification *)note { [self setActive:_active]; }
 
 - (void)setActive:(BOOL)active {
@@ -1070,6 +1099,12 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
     [self saveMetalFXMode];
     [UIView animateWithDuration:0.2 animations:^{ self->_metalfxModeRow.hidden = !sender.on; }];
     [self refreshConfigurationSummary];
+}
+- (void)frameGenerationChanged:(UISwitch *)sender {
+    [NSUserDefaults.standardUserDefaults setBool:sender.on forKey:@"Theft4MetalFXFrameInterpolation"];
+}
+- (void)visualEnhancementChanged:(UISwitch *)sender {
+    [NSUserDefaults.standardUserDefaults setBool:sender.on forKey:@"Theft4VisualEnhancement"];
 }
 - (void)metalfxOutputChanged:(UISegmentedControl *)sender {
     const NSInteger i = sender.selectedSegmentIndex;
