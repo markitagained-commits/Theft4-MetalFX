@@ -5,6 +5,7 @@
 #import "Theft4CityView.h"
 #include "theft4_output_policy.h"
 #include "theft4_upscale_preset.h"
+#import "Theft4DensitySettings.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -62,18 +63,9 @@ static UIButton *Action(NSString *title, BOOL primary) {
     return button;
 }
 
-// Theft4-MetalFX: density percentages shown by the density control:
-// 5% steps from 5 to 35, then 60 / 80 / 100.
-static const NSInteger kTheft4DensityPercents[] = {5, 10, 15, 20, 25, 30, 35, 60, 80, 100};
-static const NSInteger kTheft4DensityCount = sizeof(kTheft4DensityPercents) / sizeof(kTheft4DensityPercents[0]);
+// Theft4-MetalFX: density control segment <-> stored percentage.
 static NSInteger Theft4DensitySegment(NSString *percentKey, NSString *legacyIndexKey) {
-    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-    NSInteger percent = 60;
-    if ([defaults objectForKey:percentKey]) percent = [defaults integerForKey:percentKey];
-    else if ([defaults objectForKey:legacyIndexKey]) {
-        const NSInteger legacy[] = {35, 60, 80, 100};
-        percent = legacy[MAX(0, MIN(3, [defaults integerForKey:legacyIndexKey]))];
-    }
+    const NSInteger percent = Theft4StoredDensityPercent(percentKey, legacyIndexKey);
     // Exact match, else the nearest step (keeps any older stored percent).
     NSInteger best = 7;
     for (NSInteger i = 0; i < kTheft4DensityCount; ++i)
@@ -81,11 +73,8 @@ static NSInteger Theft4DensitySegment(NSString *percentKey, NSString *legacyInde
     return best;
 }
 static void Theft4SaveDensitySegment(NSInteger segment, NSString *percentKey, NSString *legacyIndexKey) {
-    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-    const NSInteger percent = kTheft4DensityPercents[MAX(0, MIN(kTheft4DensityCount - 1, segment))];
-    [defaults setInteger:percent forKey:percentKey];
-    // Keep the older index key meaningful for earlier builds (5%/15% -> Low).
-    [defaults setInteger:percent >= 100 ? 3 : percent >= 80 ? 2 : percent >= 60 ? 1 : 0 forKey:legacyIndexKey];
+    Theft4StoreDensityPercent(kTheft4DensityPercents[MAX(0, MIN(kTheft4DensityCount - 1, segment))],
+                              percentKey, legacyIndexKey);
 }
 
 static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *identifier,

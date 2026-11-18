@@ -15,6 +15,7 @@
 #include <mach/mach.h>
 #include <os/proc.h>
 #include "theft4_perf_stats.h"
+#import "Theft4DensitySettings.h"
 int theft4_fi_status(void);
 #include "../../glue/rexglue-sdk-main/include/rex/diagnostics/runtime_callers.h"
 #include "../../glue/rexglue-sdk-main/include/rex/diagnostics/frame_scheduling.h"
@@ -3703,8 +3704,6 @@ typedef struct {
     NSInteger traffic, peds, metalfxMode, metalfxOutput, renderHeight;
 } Theft4BenchmarkInputs;
 
-static NSInteger Theft4DensityStepDown(NSInteger percent);
-
 // Returns verdict, bound, recommended profile, reasons and confidence.
 static NSDictionary *Theft4BenchmarkRecommendation(Theft4BenchmarkInputs in) {
     // Target: steady 30 FPS presented. Without frame generation that is 30
@@ -3765,20 +3764,6 @@ static NSDictionary *Theft4BenchmarkRecommendation(Theft4BenchmarkInputs in) {
     return @{@"verdict": verdict, @"bound": bound, @"reasons": reasons, @"confidence": confidence,
              @"recommended": @{@"traffic_percent": @(newTraffic), @"ped_percent": @(newPeds),
                                @"metalfx_mode": @(newMode), @"metalfx_output": @(newOutput), @"render_height": @(newHeight)}};
-}
-
-static NSInteger Theft4StoredDensityPercent(NSString *percentKey, NSString *legacyKey) {
-    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
-    if ([d objectForKey:percentKey]) return [d integerForKey:percentKey];
-    if ([d objectForKey:legacyKey]) { const NSInteger l[] = {35, 60, 80, 100}; return l[MAX(0, MIN(3, [d integerForKey:legacyKey]))]; }
-    return 60;
-}
-static NSInteger Theft4DensityStepDown(NSInteger percent) {
-    // Same steps as the launcher's density control.
-    const NSInteger steps[] = {5, 10, 15, 20, 25, 30, 35, 60, 80, 100};
-    const NSInteger count = sizeof(steps) / sizeof(steps[0]);
-    for (NSInteger i = count - 1; i > 0; --i) if (percent >= steps[i]) return steps[i - 1];
-    return 5;
 }
 
 - (void)startBenchmark {
@@ -3944,10 +3929,8 @@ static NSInteger Theft4DensityStepDown(NSInteger percent) {
 - (void)applyBenchmarkProfile:(NSDictionary *)profile {
     NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
     const NSInteger traffic = [profile[@"traffic_percent"] integerValue], peds = [profile[@"ped_percent"] integerValue];
-    [d setInteger:traffic forKey:@"Theft4TrafficDensityPct"];
-    [d setInteger:peds forKey:@"Theft4PedDensityPct"];
-    [d setInteger:traffic >= 100 ? 3 : traffic >= 80 ? 2 : traffic >= 60 ? 1 : 0 forKey:@"Theft4TrafficDensity"];
-    [d setInteger:peds >= 100 ? 3 : peds >= 80 ? 2 : peds >= 60 ? 1 : 0 forKey:@"Theft4PedDensity"];
+    Theft4StoreDensityPercent(traffic, @"Theft4TrafficDensityPct", @"Theft4TrafficDensity");
+    Theft4StoreDensityPercent(peds, @"Theft4PedDensityPct", @"Theft4PedDensity");
     const NSInteger mode = [profile[@"metalfx_mode"] integerValue];
     [d setInteger:mode forKey:@"Theft4MetalFXMode"];
     if (mode > 0) {
