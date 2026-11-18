@@ -7,7 +7,7 @@ You need your own legally dumped Xbox 360 copy of GTA IV. No game files come wit
 ## What I improved
 
 ### Load your game files without the hassle
-On first open the loader appears right away (no setup screen to get past). If you close it, tap **LOAD GAME FILES** to bring it back. Pick how you want to do it:
+The app opens straight to the normal launcher; nothing pops up or blocks it. When you're ready, open the loader yourself: tap **LOAD GAME FILES** (System tab), or just tap Play while no game is installed. The launcher status tells you what's missing. Pick how you want to do it:
 
 - **Download ZIP/ISO From Link** – paste a direct download link that starts the file right away (use `https://`; plain `http://` links may be blocked by iOS). Dropbox and Google Drive share links work. It downloads over 16 connections at once, like a download manager, shows MB/s and time left, and picks back up if a piece fails.
 - **Select ZIP/ISO From Files** – pick a ZIP or an Xbox 360 ISO and it gets unpacked for you. A ZIP with an ISO inside works too. It checks what the file really is, not just the name.

@@ -563,7 +563,7 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
         Copy(@"Export a dated backup to Files → On My iPhone/iPad → Theft4 → Save Exports. Import a Theft4 save-export folder only while the game is closed; current saves are backed up first.", 12, NO),
         _exportSavesButton, _importSavesButton,
         _prepareButton, _restartButton, _detailLabel,
-        Copy([NSString stringWithFormat:@"On first launch, %@ creates Files → On My iPhone/iPad → %@ → game. Copy the contents of the prepared game folder into game, then verify.", displayName, displayName], 13, NO)
+        Copy([NSString stringWithFormat:@"%@ creates Files → On My iPhone/iPad → %@ → game. Tap LOAD GAME FILES (or Play) to download or pick a ZIP, Xbox 360 ISO, or game folder, or copy the game folder's contents into game and tap CHECK GAME FILES.", displayName, displayName], 13, NO)
     ]];
 #ifdef THEFT4_BC_TEXTURE_COMPATIBILITY
     UIStackView *astcRow = (UIStackView *)[self setting:@"ASTC TEXTURE COMPATIBILITY"

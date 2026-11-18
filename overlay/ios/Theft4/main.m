@@ -96,14 +96,6 @@ static NSString *Theft4SetupCompleteDefaultsKey(void) {
 #endif
 }
 
-static NSString *Theft4InstallationDirectoryCreatedDefaultsKey(void) {
-#ifdef THEFT4_INTRO_TEST_BUILD
-    return @"Theft4IntroTestDirectoryCreated";
-#else
-    return @"Theft4InstallationDirectoryCreated";
-#endif
-}
-
 #ifdef THEFT4_TEXTURE_PREPARATION_PREVIEW
 static NSString *Theft4TextureSourcesReviewedDefaultsKey(void) {
 #ifdef THEFT4_BC_TEXTURE_COMPATIBILITY
@@ -608,10 +600,8 @@ static BOOL Theft4InstallSaveExport(NSURL *selected, NSURL *support, NSURL *docu
     UIActivityIndicatorView *_installationSpinner;
     UIButton *_installationAction;
     Theft4InstallationStep _installationStep;
-    BOOL _installationFlowPresented;
     BOOL _baseGameChecked;
     BOOL _baseGameCheckAttempted;
-    BOOL _autoOfferedGameSources;
     BOOL _setupValidated;
 #ifdef THEFT4_BC_TEXTURE_COMPATIBILITY
     Theft4TexturePreparation *_texturePreparation;
@@ -646,7 +636,8 @@ static BOOL Theft4InstallSaveExport(NSURL *selected, NSURL *support, NSURL *docu
 - (void)leaveTexturePreparation;
 - (void)confirmDeleteTextureCache;
 #endif
-- (void)presentInstallationFlowIfNeeded;
+- (void)updateLauncherForGameFiles;
+- (void)updateGameFilesButton:(BOOL)setupComplete;
 - (void)routeInstallationFlow;
 - (void)checkBaseGame;
 - (BOOL)organizeGameFolder;
@@ -1245,6 +1236,7 @@ static void bootEvent(void *context, const char *event) {
     if (![self isSetupComplete]) return NO;
     const BOOL newlyDetected = _installationStep != Theft4InstallationStepReady;
     [self markSetupComplete];
+    [self updateGameFilesButton:YES];
     _baseGameChecked = YES;
     _installationStep = Theft4InstallationStepReady;
 #ifdef THEFT4_TEXTURE_PREPARATION_PREVIEW
@@ -1293,8 +1285,11 @@ static void bootEvent(void *context, const char *event) {
         _installationStep == Theft4InstallationStepCreatingDirectory ||
         _installationStep == Theft4InstallationStepCheckingBaseGame ||
         _installationStep == Theft4InstallationStepInstallingUpdate) return;
-    if (_installationFlowPresented) [self routeInstallationFlow];
-    else [self presentInstallationFlowIfNeeded];
+    // The loader never opens by itself: on launch/foreground only keep an
+    // installation step the user already opened current, otherwise just
+    // update the launcher's status and game-files button.
+    if (_installationOverlay && !_installationOverlay.hidden) [self routeInstallationFlow];
+    else [self updateLauncherForGameFiles];
 }
 
 - (void)createInstallationOverlayIfNeeded {
@@ -1438,27 +1433,49 @@ static void bootEvent(void *context, const char *event) {
 #endif
 }
 
-- (void)presentInstallationFlowIfNeeded {
-    if (_installationFlowPresented || _failure || !_gameURL) return;
-    if ([self completeSetupForInstalledGame]) return;
-    _installationFlowPresented = YES;
-    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-    const BOOL firstLaunch = ![defaults boolForKey:Theft4InstallationDirectoryCreatedDefaultsKey()];
-    [defaults setBool:YES forKey:Theft4InstallationDirectoryCreatedDefaultsKey()];
-    if (!firstLaunch) {
-        [self routeInstallationFlow];
-        return;
+- (void)updateGameFilesButton:(BOOL)setupComplete {
+    // Reuses the launcher's existing System → game-files button: it opens the
+    // loader until the game is installed, then keeps its verify role.
+    NSString *title = @"VERIFY GAME FILES";
+    if (!setupComplete) {
+        const BOOL hasBase = _gameURL && [NSFileManager.defaultManager
+            fileExistsAtPath:[[_gameURL URLByAppendingPathComponent:@"default.xex"] path]];
+        title = hasBase ? @"CHECK GAME FILES" : @"LOAD GAME FILES";
     }
+    UIButtonConfiguration *configuration = _prepare.configuration;
+    if ([configuration.title isEqualToString:title]) return;
+    configuration.title = title;
+    _prepare.configuration = configuration;
+}
 
-    [self showInstallationTitle:@"CREATING DIRECTORY"
-                         detail:[NSString stringWithFormat:@"Preparing %@ for your game files…",
-                             Theft4FilesGamePath()]
-                    actionTitle:nil spinner:YES step:Theft4InstallationStepCreatingDirectory];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (self->_installationStep == Theft4InstallationStepCreatingDirectory)
-            [self routeInstallationFlow];
-    });
+- (void)updateLauncherForGameFiles {
+    // Show the normal launcher, never the full-screen installation overlay.
+    // The game folder was already created silently in
+    // initializeSharedGameDirectory; the loader is opened only by the user
+    // (System → LOAD GAME FILES, or Play while no game is installed).
+#ifdef THEFT4_BC_TEXTURE_COMPATIBILITY
+    if (_texturePreparation.running || _textureCacheDeleting) return;
+#endif
+    if (_failure || !_gameURL || _loading || _executionAttempted ||
+        _installationStep == Theft4InstallationStepCheckingBaseGame ||
+        _installationStep == Theft4InstallationStepInstallingUpdate) return;
+    if ([self completeSetupForInstalledGame]) return;
+    _installationOverlay.hidden = YES;
+    [_installationSpinner stopAnimating];
+    _installationStep = Theft4InstallationStepCopyBaseGame;
+    const BOOL hasBase = [NSFileManager.defaultManager
+        fileExistsAtPath:[[_gameURL URLByAppendingPathComponent:@"default.xex"] path]];
+    if (!hasBase) {
+        _bootStatus = _baseGameCheckAttempted
+            ? @"No game files found yet — tap LOAD GAME FILES (System) or Play."
+            : @"No game files yet — tap LOAD GAME FILES (System) or Play.";
+    } else if (_baseGameChecked) {
+        _bootStatus = @"Base game verified. Tap CHECK GAME FILES (System) or Play to add Title Update 8.";
+    } else {
+        _bootStatus = @"Game files found. Tap CHECK GAME FILES (System) or Play to finish setup.";
+    }
+    [self updateGameFilesButton:NO];
+    [self refresh];
 }
 
 - (void)routeInstallationFlow {
@@ -1472,29 +1489,9 @@ static void bootEvent(void *context, const char *event) {
     const BOOL hasBase = [NSFileManager.defaultManager
         fileExistsAtPath:[[_gameURL URLByAppendingPathComponent:@"default.xex"] path]];
     if (!hasBase) {
-        // No "quit the app and copy files in Files" instructions: the loader is
-        // opened right away, so there is nothing to read or get past.
-        NSString *title = _baseGameCheckAttempted ? @"GAME FILES NOT FOUND"
-                                                   : @"LOAD GAME FILES";
-        NSString *detail = _baseGameCheckAttempted
-            ? @"No game files were found yet. Tap LOAD GAME FILES to download or pick a ZIP or Xbox 360 ISO, or pick your game folder."
-            : @"Download a ZIP or Xbox 360 ISO from a direct link, pick one from Files, or pick your extracted game folder.";
-        [self showInstallationTitle:title detail:detail
-                        actionTitle:@"LOAD GAME FILES" spinner:NO
-                               step:Theft4InstallationStepCopyBaseGame];
-        // Open the loader once automatically on a fresh launch.
-        if (!_autoOfferedGameSources && !_baseGameCheckAttempted) {
-            _autoOfferedGameSources = YES;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                // Not on screen yet, or another sheet is up: try again on the
-                // next routing pass instead of dropping the offer.
-                if (!self.view.window || self.presentedViewController) {
-                    self->_autoOfferedGameSources = NO;
-                    return;
-                }
-                [self offerGameFileSources];
-            });
-        }
+        // Missing game files never block the launcher with an overlay; the
+        // user opens the loader from LOAD GAME FILES or Play.
+        [self updateLauncherForGameFiles];
         return;
     }
     if (!_baseGameChecked) {
@@ -1738,10 +1735,13 @@ static void bootEvent(void *context, const char *event) {
             // A transfer can finish while the base-only check is running.
             // Recheck the full installation even if the old base was rejected.
             if ([self completeSetupForInstalledGame]) return;
-            [self showInstallationTitle:@"GAME FILES NOT READY"
-                                 detail:detail.length ? detail : @"The extracted base game could not be verified."
-                            actionTitle:@"CHECK AGAIN" spinner:NO
-                                   step:Theft4InstallationStepCopyBaseGame];
+            // Back to the launcher (this overlay had no way out); the reason
+            // stays visible in the launcher status.
+            [self updateLauncherForGameFiles];
+            self->_bootStatus = [@"Game files not ready: " stringByAppendingString:
+                detail.length ? detail : @"the extracted base game could not be verified."];
+            [self record:@"install.base_game_not_ready"];
+            [self refresh];
         });
     });
 }
@@ -1750,7 +1750,6 @@ static void bootEvent(void *context, const char *event) {
 - (void)runIntroTestImportSmokeIfRequested {
     if (![NSProcessInfo.processInfo.arguments containsObject:@"--theft4-intro-import-smoke"] ||
         !_gameURL) return;
-    _installationFlowPresented = YES;
     NSURL *testRoot = [_gameURL URLByDeletingLastPathComponent];
     NSURL *source = [[testRoot URLByAppendingPathComponent:@"title-update-source" isDirectory:YES]
         URLByAppendingPathComponent:@"default.xexp"];
@@ -1878,8 +1877,9 @@ static void bootEvent(void *context, const char *event) {
         style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { [self chooseGameFolder]; }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"CHECK FOR GAME FILES"
         style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { [self checkBaseGame]; }]];
+    // Cancel always lands on the launcher, including from a failed-transfer screen.
     [sheet addAction:[UIAlertAction actionWithTitle:@"CANCEL"
-        style:UIAlertActionStyleCancel handler:nil]];
+        style:UIAlertActionStyleCancel handler:^(UIAlertAction *a) { [self updateLauncherForGameFiles]; }]];
     [self presentViewController:sheet animated:YES completion:nil];
 }
 
@@ -1896,7 +1896,8 @@ static void bootEvent(void *context, const char *event) {
         field.text = [NSUserDefaults.standardUserDefaults stringForKey:@"Theft4GameDownloadURL"];
     }];
     __weak UIAlertController *weakPrompt = prompt;
-    [prompt addAction:[UIAlertAction actionWithTitle:@"CANCEL" style:UIAlertActionStyleCancel handler:nil]];
+    [prompt addAction:[UIAlertAction actionWithTitle:@"CANCEL" style:UIAlertActionStyleCancel
+        handler:^(UIAlertAction *a) { [self updateLauncherForGameFiles]; }]];
     [prompt addAction:[UIAlertAction actionWithTitle:@"DOWNLOAD" style:UIAlertActionStyleDefault
         handler:^(UIAlertAction *a) {
         NSString *text = [weakPrompt.textFields.firstObject.text
@@ -2309,7 +2310,9 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     }
     if (_installationStep == Theft4InstallationStepSelectingUpdate ||
         _installationStep == Theft4InstallationStepUpdateFailed) {
-        [self routeInstallationFlow];
+        // Cancelling the title-update picker returns to the launcher instead
+        // of re-showing the blocking overlay.
+        [self updateLauncherForGameFiles];
     }
 }
 
@@ -4009,6 +4012,11 @@ static NSDictionary *Theft4BenchmarkRecommendation(Theft4BenchmarkInputs in) {
 - (BOOL)prefersHomeIndicatorAutoHidden { return _executionAttempted; }
 
 - (void)prepareTransferredGame {
+    // LOAD/CHECK GAME FILES until installed; VERIFY GAME FILES afterwards.
+    if (!_launcherDuringGame && ![self isSetupComplete]) {
+        [self offerGameFileSources];
+        return;
+    }
     [self startGamePreparation:_gameURL];
 }
 
@@ -4019,6 +4027,11 @@ static NSDictionary *Theft4BenchmarkRecommendation(Theft4BenchmarkInputs in) {
 - (void)startTransferredGame {
     if (_launcherDuringGame) {
         [self resumeGameFromLauncher];
+        return;
+    }
+    // No installed game yet: Play opens the loader instead of failing.
+    if (![self isSetupComplete]) {
+        [self offerGameFileSources];
         return;
     }
 #ifdef THEFT4_BC_TEXTURE_COMPATIBILITY
