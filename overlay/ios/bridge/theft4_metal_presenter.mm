@@ -299,6 +299,7 @@ void theft4_metal_renderer_shutdown(void) {
   @autoreleasepool {
     os_unfair_lock_lock(&presenter_lock);
     id<MTLCommandBuffer> pending = frame_command_buffer;
+    dispatch_semaphore_t slots = frame_slots;
     frame_command_buffer = nil;
     guest_memory_buffer = nil;
     edram_buffer = nil;
@@ -307,6 +308,10 @@ void theft4_metal_renderer_shutdown(void) {
     if (pending) {
       [pending commit];
       [pending waitUntilCompleted];
+      // The open frame took a slot in EnsureFrameCommandBufferLocked. Return
+      // it: libdispatch traps when a semaphore is released below its
+      // initial value.
+      if (slots) dispatch_semaphore_signal(slots);
     }
   }
 }
