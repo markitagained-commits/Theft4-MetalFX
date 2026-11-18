@@ -12,8 +12,9 @@
 //    view-projection matrices (EnvironmentalDataV1). GTA IV supplies no
 //    per-object velocities, so moving cars/peds only carry camera motion.
 // Presentation: interpolated frame, then the real frame, each held for at
-// least half of the measured real-frame interval (presentDrawable:
-// afterMinimumDuration:). No frame duplication or blending is used.
+// least max(1/30 s, half the measured real-frame interval) (presentDrawable:
+// afterMinimumDuration:), so presented frames (real + generated) stay at the
+// game's 30 FPS cap. No frame duplication or blending is used.
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include <cstdint>
@@ -44,6 +45,7 @@ bool Present(id<MTLCommandQueue> queue, CAMetalLayer* layer, id<MTLTexture> colo
 
 extern "C" {
 // From the title frontend, before each presented frame is submitted.
+// valid: bit 0 = view-projection valid, bit 1 = projection valid.
 void theft4_fi_note_camera(const float* view_projection16, const float* projection16,
                            int valid, float time_step_seconds);
 // 0 off, 1 active, -1 device unsupported, -2 creation failed, -3 waiting for inputs.

@@ -107,6 +107,9 @@ BOOL Theft4ExtractZip(NSString *zipPath, NSString *destination,
     if (!readAt(f, cdOffset, cd.data(), cd.size())) { fail(error, @"Could not read the ZIP directory."); return NO; }
 
     std::vector<Entry> entries;
+    // Every directory record is at least 46 bytes, so a count that cannot fit
+    // in the directory is damage, not a reason to reserve gigabytes.
+    if (entryCount > cdSize / 46) { fail(error, @"The ZIP directory is damaged."); return NO; }
     entries.reserve((size_t)entryCount);
     uint64_t totalBytes = 0;
     size_t p = 0;
@@ -190,6 +193,11 @@ BOOL Theft4ExtractZip(NSString *zipPath, NSString *destination,
                 if (fwrite(in.data(), 1, chunk, o) != chunk) { ok = false; break; }
                 remaining -= chunk;
                 doneBytes += chunk;
+                if (progress && totalBytes) {
+                    double frac = (double)doneBytes / (double)totalBytes;
+                    if (frac - lastReported >= 0.005) { lastReported = frac; progress(frac); }
+                }
+                if (cancelled && cancelled()) { ok = false; break; }
             }
         } else {
             z_stream zs;
@@ -197,14 +205,17 @@ BOOL Theft4ExtractZip(NSString *zipPath, NSString *destination,
             if (inflateInit2(&zs, -MAX_WBITS) != Z_OK) ok = false;
             int status = Z_OK;
             while (ok && status != Z_STREAM_END) {
-                if (zs.avail_in == 0) {
-                    if (remaining == 0) { ok = false; break; }
+                if (zs.avail_in == 0 && remaining > 0) {
                     size_t chunk = (size_t)std::min<uint64_t>(remaining, in.size());
                     if (fread(in.data(), 1, chunk, f) != chunk) { ok = false; break; }
                     remaining -= chunk;
                     zs.next_in = in.data();
                     zs.avail_in = (uInt)chunk;
                 }
+                // With all input consumed, inflate can still hold output that
+                // did not fit in the last 1 MB buffer, so keep calling it. Only a
+                // call that makes no progress (Z_BUF_ERROR, given a fresh output
+                // buffer) means the entry is cut short.
                 zs.next_out = out.data();
                 zs.avail_out = (uInt)out.size();
                 status = inflate(&zs, Z_NO_FLUSH);
@@ -224,6 +235,7 @@ BOOL Theft4ExtractZip(NSString *zipPath, NSString *destination,
         if (fclose(o) != 0) ok = false;
         if (!ok) {
             [fm removeItemAtPath:target error:nil];
+            if (cancelled && cancelled()) { fail(error, @"Extraction cancelled."); return NO; }
             fail(error, [NSString stringWithFormat:@"Could not extract %s. The file may be damaged, or storage is full.", en.name.c_str()]);
             return NO;
         }
@@ -244,7 +256,7 @@ BOOL Theft4FlattenGameFolder(NSString *destination) {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *xex = [destination stringByAppendingPathComponent:@"default.xex"];
     if ([fm fileExistsAtPath:xex]) return YES;
-    // Search up to three folder levels for the folder that holds default.xex.
+    // Search up to four folder levels for the folder that holds default.xex.
     NSString *found = nil;
     NSDirectoryEnumerator *walker = [fm enumeratorAtPath:destination];
     for (NSString *relative in walker) {
@@ -255,15 +267,25 @@ BOOL Theft4FlattenGameFolder(NSString *destination) {
         }
     }
     if (!found || [found isEqualToString:destination]) return [fm fileExistsAtPath:xex];
+    // Move the wrapper's top folder aside first. Otherwise a game folder that
+    // holds an item with the wrapper's own name (GTAIV/GTAIV/...) would make
+    // the move below delete the wrapper, and the whole game with it.
+    NSString *topName = [[found substringFromIndex:destination.length + 1] pathComponents].firstObject;
+    if (!topName.length) return [fm fileExistsAtPath:xex];
+    NSString *top = [destination stringByAppendingPathComponent:topName];
+    NSString *aside = [destination stringByAppendingPathComponent:
+        [@".theft4-flatten-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+    if (![fm moveItemAtPath:top toPath:aside error:nil]) return [fm fileExistsAtPath:xex];
+    found = [aside stringByAppendingPathComponent:[found substringFromIndex:top.length]];
+    BOOL moved = YES;
     for (NSString *item in [fm contentsOfDirectoryAtPath:found error:nil]) {
         NSString *to = [destination stringByAppendingPathComponent:item];
         if ([fm fileExistsAtPath:to]) [fm removeItemAtPath:to error:nil];
-        [fm moveItemAtPath:[found stringByAppendingPathComponent:item] toPath:to error:nil];
+        if (![fm moveItemAtPath:[found stringByAppendingPathComponent:item] toPath:to error:nil]) moved = NO;
     }
-    // Remove the now-empty wrapper folders.
-    NSString *top = [destination stringByAppendingPathComponent:
-        [[found substringFromIndex:destination.length + 1] pathComponents].firstObject ?: @""];
-    if (top.length > destination.length) [fm removeItemAtPath:top error:nil];
+    // Remove the now-empty wrapper folders, but never a folder whose files
+    // failed to move.
+    if (moved) [fm removeItemAtPath:aside error:nil];
     return [fm fileExistsAtPath:xex];
 }
 
@@ -522,9 +544,20 @@ static NSURL *Theft4DirectLink(NSURL *url) {
         NSDictionary *fs = [NSFileManager.defaultManager attributesOfFileSystemForPath:
             [_destination stringByDeletingLastPathComponent] error:nil];
         long long freeBytes = [fs[NSFileSystemFreeSize] longLongValue];
-        if (freeBytes > 0 && freeBytes < _total + 256LL * 1024 * 1024) {
-            _probeError = [NSString stringWithFormat:@"Not enough storage. The ZIP needs %@ and only %@ is free.",
-                [NSByteCountFormatter stringFromByteCount:_total countStyle:NSByteCountFormatterCountStyleFile],
+        // iOS can purge caches to make room for a user-started download; the
+        // "important usage" figure counts that space, the raw free size does not.
+        NSNumber *important = nil;
+        NSURL *dir = [NSURL fileURLWithPath:[_destination stringByDeletingLastPathComponent]];
+        if ([dir getResourceValue:&important forKey:NSURLVolumeAvailableCapacityForImportantUsageKey error:nil] &&
+            important.longLongValue > freeBytes)
+            freeBytes = important.longLongValue;
+        // The archive and the unpacked game sit on disk together until the
+        // archive is deleted, so ask for room for both up front instead of
+        // failing hours later in the middle of extraction.
+        const long long needed = _total * 2 + 256LL * 1024 * 1024;
+        if (freeBytes > 0 && freeBytes < needed) {
+            _probeError = [NSString stringWithFormat:@"Not enough storage. Downloading and unpacking this needs about %@ and only %@ is free.",
+                [NSByteCountFormatter stringFromByteCount:needed countStyle:NSByteCountFormatterCountStyleFile],
                 [NSByteCountFormatter stringFromByteCount:freeBytes countStyle:NSByteCountFormatterCountStyleFile]];
             return;
         }

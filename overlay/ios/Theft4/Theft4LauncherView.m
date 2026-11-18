@@ -62,8 +62,10 @@ static UIButton *Action(NSString *title, BOOL primary) {
     return button;
 }
 
-// Theft4-MetalFX: density percentages shown by the 6-way density control.
-static const NSInteger kTheft4DensityPercents[] = {5, 15, 35, 60, 80, 100};
+// Theft4-MetalFX: density percentages shown by the density control:
+// 5% steps from 5 to 35, then 60 / 80 / 100.
+static const NSInteger kTheft4DensityPercents[] = {5, 10, 15, 20, 25, 30, 35, 60, 80, 100};
+static const NSInteger kTheft4DensityCount = sizeof(kTheft4DensityPercents) / sizeof(kTheft4DensityPercents[0]);
 static NSInteger Theft4DensitySegment(NSString *percentKey, NSString *legacyIndexKey) {
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     NSInteger percent = 60;
@@ -72,12 +74,15 @@ static NSInteger Theft4DensitySegment(NSString *percentKey, NSString *legacyInde
         const NSInteger legacy[] = {35, 60, 80, 100};
         percent = legacy[MAX(0, MIN(3, [defaults integerForKey:legacyIndexKey]))];
     }
-    for (NSInteger i = 0; i < 6; ++i) if (kTheft4DensityPercents[i] == percent) return i;
-    return 3;
+    // Exact match, else the nearest step (keeps any older stored percent).
+    NSInteger best = 7;
+    for (NSInteger i = 0; i < kTheft4DensityCount; ++i)
+        if (labs(kTheft4DensityPercents[i] - percent) < labs(kTheft4DensityPercents[best] - percent)) best = i;
+    return best;
 }
 static void Theft4SaveDensitySegment(NSInteger segment, NSString *percentKey, NSString *legacyIndexKey) {
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-    const NSInteger percent = kTheft4DensityPercents[MAX(0, MIN(5, segment))];
+    const NSInteger percent = kTheft4DensityPercents[MAX(0, MIN(kTheft4DensityCount - 1, segment))];
     [defaults setInteger:percent forKey:percentKey];
     // Keep the older index key meaningful for earlier builds (5%/15% -> Low).
     [defaults setInteger:percent >= 100 ? 3 : percent >= 80 ? 2 : percent >= 60 ? 1 : 0 forKey:legacyIndexKey];
@@ -453,7 +458,8 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
         // Theft4-MetalFX: city density (CPU). Stored as a percentage under
         // Theft4TrafficDensityPct / Theft4PedDensityPct; the older index keys
         // (0 Low 35%, 1 Medium 60%, 2 High 80%, 3 Stock) are migrated on read.
-        NSArray<NSString *> *densityItems = @[@"5%", @"15%", @"35%", @"60%", @"80%", @"100%"];
+        // Percent values; "%" is dropped so ten segments fit on a phone.
+        NSArray<NSString *> *densityItems = @[@"5", @"10", @"15", @"20", @"25", @"30", @"35", @"60", @"80", @"100"];
         _trafficDensity = ChoiceControl(densityItems, @"trafficDensity",
             @"Traffic density", @"Applies at the next game launch.");
         _pedDensity = ChoiceControl(densityItems, @"pedDensity",
@@ -463,10 +469,10 @@ static UISegmentedControl *ChoiceControl(NSArray<NSString *> *items, NSString *i
         [_trafficDensity addTarget:self action:@selector(trafficDensityChanged:) forControlEvents:UIControlEventValueChanged];
         [_pedDensity addTarget:self action:@selector(pedDensityChanged:) forControlEvents:UIControlEventValueChanged];
         [graphicsRows addObject:[self choice:@"TRAFFIC DENSITY"
-            detail:@"Share of GTA IV's own car spawn multiplier (driving and parked). Lower spawns fewer cars, which saves CPU. 60% is the default. Missions that clear the streets still do. Applies at the next game launch."
+            detail:@"Share of GTA IV's own car spawn multiplier (driving and parked). Lower spawns fewer cars, which saves CPU. Values are percent; 60% is the default. Missions that clear the streets still do. Applies at the next game launch."
             control:_trafficDensity]];
         [graphicsRows addObject:[self choice:@"PEDESTRIAN DENSITY"
-            detail:@"Share of GTA IV's own pedestrian spawn multiplier (ambient and scenario). Lower spawns fewer people, which saves CPU. 60% is the default. Applies at the next game launch."
+            detail:@"Share of GTA IV's own pedestrian spawn multiplier (ambient and scenario). Lower spawns fewer people, which saves CPU. Values are percent; 60% is the default. Applies at the next game launch."
             control:_pedDensity]];
     }
 

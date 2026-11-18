@@ -87,6 +87,8 @@ jobs:
           # fails CI instead of silently disabling a feature on device.
           xcodebuild -downloadComponent MetalToolchain >/dev/null 2>&1 || true
           python3 ci/check_runtime_msl.py overlay
+
+      - name: Apply overlay and patches
         run: |
           cp -R overlay/. "$RUNNER_TEMP/Theft4/"
           python3 ci/patches/apply_patches.py "$RUNNER_TEMP/Theft4"

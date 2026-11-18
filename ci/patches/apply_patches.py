@@ -25,11 +25,15 @@ patch(
     "    if(!frame_backend_->Submit(plan,present.device!=0,error,&final))return false;",
     """    if(present.device&&!diagnostic_scan) {
       const EnvironmentalDataV1* theft4_env=environmental_data.get();
-      const uint64_t theft4_fi_fields=EnvironmentalFieldBit(EnvironmentalField::kViewProjectionMatrix)|
-          EnvironmentalFieldBit(EnvironmentalField::kProjectionMatrix);
+      // bit 0: view-projection valid (motion vectors), bit 1: projection valid
+      // (interpolator camera only). Motion must not depend on the projection.
+      const uint64_t theft4_fi_fields=theft4_env?theft4_env->valid_fields:0;
+      const int theft4_fi_valid=
+          ((theft4_fi_fields&EnvironmentalFieldBit(EnvironmentalField::kViewProjectionMatrix))?1:0)|
+          ((theft4_fi_fields&EnvironmentalFieldBit(EnvironmentalField::kProjectionMatrix))?2:0);
       theft4_fi_note_camera(theft4_env?theft4_env->view_projection_matrix.data():nullptr,
           theft4_env?theft4_env->projection_matrix.data():nullptr,
-          theft4_env&&(theft4_env->valid_fields&theft4_fi_fields)==theft4_fi_fields,
+          theft4_fi_valid,
           theft4_env?theft4_env->time_step_seconds:0.0f);
     }
     if(!frame_backend_->Submit(plan,present.device!=0,error,&final))return false;""",

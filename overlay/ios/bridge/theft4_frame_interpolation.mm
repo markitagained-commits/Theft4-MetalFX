@@ -14,7 +14,8 @@
 namespace {
 struct Camera {
   std::array<float,16> vp{}, proj{};
-  bool valid=false;
+  bool valid=false;       // view-projection valid (needed for motion vectors)
+  bool proj_valid=false;  // projection valid (only refines interpolator camera)
   float dt=0;
   uint64_t serial=0;
 };
@@ -89,6 +90,26 @@ fragment FIMotionOut theft4_fi_motion(FIV in [[stage_in]], depth2d<float> d [[te
   }
   return o;
 }
+// Same pass for a multisampled scene depth (MSAA on): sample 0 of each pixel.
+fragment FIMotionOut theft4_fi_motion_ms(FIV in [[stage_in]], depth2d_ms<float> d [[texture(0)]],
+                                         constant FIConstants& k [[buffer(0)]]) {
+  float2 uv = in.p.xy / k.size;
+  uint2 dc = min(uint2(uv * float2(d.get_width(), d.get_height())),
+                 uint2(d.get_width() - 1, d.get_height() - 1));
+  float z = d.read(dc, 0);
+  FIMotionOut o; o.depth = z; o.motion = float2(0.0);
+  float4 w = k.inv_vp * float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, z, 1.0);
+  if (abs(w.w) > 1e-7) {
+    w /= w.w;
+    float4 pc = k.prev_vp * w;
+    if (pc.w > 1e-6) {
+      float2 pn = pc.xy / pc.w;
+      float2 puv = float2(pn.x * 0.5 + 0.5, 0.5 - pn.y * 0.5);
+      o.motion = (puv - uv) * k.sign;
+    }
+  }
+  return o;
+}
 )MSL";
 
 struct State {
@@ -97,7 +118,7 @@ struct State {
   bool failed=false,unsupported=false;
   id<MTLFXFrameInterpolator> interpolator=nil;
   id<MTLLibrary> library=nil;
-  id<MTLRenderPipelineState> copy_rgba16=nil, copy_drawable=nil, motion=nil;
+  id<MTLRenderPipelineState> copy_rgba16=nil, copy_drawable=nil, motion=nil, motion_ms=nil;
   MTLPixelFormat drawable_format=MTLPixelFormatInvalid;
   id<MTLDepthStencilState> depth_always=nil;
   std::array<id<MTLTexture>,3> colors{};
@@ -111,6 +132,7 @@ struct State {
   uint64_t last_commit_ns=0;
   double interval_s=1.0/30.0;
   uint64_t sequence=0;
+  bool encoded_last_frame=false;  // interpolator ran for the previous real frame
 };
 State state;
 std::mutex state_mutex;  // render worker only in practice; guards lazy creation
@@ -119,6 +141,11 @@ std::mutex state_mutex;  // render worker only in practice; guards lazy creation
 bool Requested() {
   static const bool requested=[NSUserDefaults.standardUserDefaults boolForKey:@THEFT4_FRAME_INTERPOLATION_KEY];
   return requested;
+}
+// Diagnostic motion-vector sign flip; read once instead of every frame.
+float MotionSign() {
+  static const float sign=[NSUserDefaults.standardUserDefaults boolForKey:@"Theft4FIMotionInvert"]?-1.f:1.f;
+  return sign;
 }
 
 id<MTLRenderPipelineState> FIPipeline(id<MTLLibrary> library, NSString* fragment,
@@ -166,6 +193,8 @@ bool Create(id<MTLDevice> device,uint32_t w,uint32_t h) {
   }
   state.copy_rgba16=FIPipeline(library,@"theft4_fi_copy",MTLPixelFormatRGBA16Float,MTLPixelFormatInvalid);
   state.motion=FIPipeline(library,@"theft4_fi_motion",MTLPixelFormatRG16Float,MTLPixelFormatDepth32Float);
+  // Optional: only used when the scene depth is multisampled.
+  state.motion_ms=FIPipeline(library,@"theft4_fi_motion_ms",MTLPixelFormatRG16Float,MTLPixelFormatDepth32Float);
   MTLDepthStencilDescriptor* ds=[MTLDepthStencilDescriptor new];
   ds.depthCompareFunction=MTLCompareFunctionAlways;ds.depthWriteEnabled=YES;
   state.depth_always=[device newDepthStencilStateWithDescriptor:ds];
@@ -191,7 +220,9 @@ bool Create(id<MTLDevice> device,uint32_t w,uint32_t h) {
 // Camera parameters for the interpolator, from the guest projection matrix
 // (row-major D3D style: [0]=x scale, [5]=y scale, [10]/[14] depth terms).
 void ConfigureCamera(const Camera& c) {
-  const float* p=c.proj.data();
+  // Without a valid projection the defaults below are used (fov 60, 0.1..5000).
+  static const std::array<float,16> kNoProjection{};
+  const float* p=c.proj_valid?c.proj.data():kNoProjection.data();
   float fov=60.f,aspect=float(state.width)/float(std::max(1u,state.height)),near_plane=0.1f,far_plane=5000.f;
   bool reversed=false;
   if(std::isfinite(p[5])&&std::fabs(p[5])>1e-4f) {
@@ -223,9 +254,12 @@ void CopyPass(id<MTLCommandBuffer> cb,id<MTLRenderPipelineState> pipeline,id<MTL
 }
 }  // namespace
 
+// valid: bit 0 = view-projection valid, bit 1 = projection valid.
 extern "C" void theft4_fi_note_camera(const float* vp,const float* proj,int valid,float dt) {
+  if(!Requested())return;  // no work at all while frame generation is off
   std::lock_guard lock(camera_mutex);
-  latest_camera.valid=valid&&vp&&proj;
+  latest_camera.valid=(valid&1)&&vp;
+  latest_camera.proj_valid=(valid&2)&&proj;
   if(vp)std::memcpy(latest_camera.vp.data(),vp,64);
   if(proj)std::memcpy(latest_camera.proj.data(),proj,64);
   latest_camera.dt=dt;++latest_camera.serial;
@@ -253,16 +287,23 @@ void EncodeMotion(Frame& frame,id<MTLTexture> scene_depth) {
   if(!state.interpolator||!scene_depth)return;
   Camera camera;{std::lock_guard c(camera_mutex);camera=latest_camera;}
   if(!camera.valid)return;
+  // Combined depth/stencil binds directly as depth2d (the depth aspect is
+  // sampled). A Depth32Float view of Depth32Float_Stencil8 is not a valid
+  // texture-view reinterpretation, so no view is created here.
   id<MTLTexture> depth=scene_depth;
-  if(depth.pixelFormat==MTLPixelFormatDepth32Float_Stencil8)
-    depth=[depth newTextureViewWithPixelFormat:MTLPixelFormatDepth32Float];
-  if(!depth||(depth.pixelFormat!=MTLPixelFormatDepth32Float&&depth.pixelFormat!=MTLPixelFormatDepth16Unorm))return;
+  const MTLPixelFormat depth_format=depth.pixelFormat;
+  if(depth_format!=MTLPixelFormatDepth32Float&&depth_format!=MTLPixelFormatDepth32Float_Stencil8&&
+     depth_format!=MTLPixelFormatDepth16Unorm)return;
+  const bool multisampled=depth.textureType==MTLTextureType2DMultisample;
+  if(!multisampled&&depth.textureType!=MTLTextureType2D)return;
+  id<MTLRenderPipelineState> pipeline=multisampled?state.motion_ms:state.motion;
+  if(!pipeline)return;
   MotionConstants k{};
   if(!Invert(camera.vp.data(),k.inv_vp))return;
   const Camera& prev=state.have_previous_camera?state.previous_camera:camera;
   std::memcpy(k.prev_vp,prev.vp.data(),64);
   k.size[0]=float(state.width);k.size[1]=float(state.height);
-  k.sign=[NSUserDefaults.standardUserDefaults boolForKey:@"Theft4FIMotionInvert"]?-1.f:1.f;
+  k.sign=MotionSign();
   std::string error;
   const bool encoded=frame.EncodeExternal([&](id<MTLCommandBuffer> cb) {
     MTLRenderPassDescriptor* rp=[MTLRenderPassDescriptor renderPassDescriptor];
@@ -272,7 +313,7 @@ void EncodeMotion(Frame& frame,id<MTLTexture> scene_depth) {
     rp.depthAttachment.loadAction=MTLLoadActionDontCare;rp.depthAttachment.storeAction=MTLStoreActionStore;
     auto e=[cb renderCommandEncoderWithDescriptor:rp];
     if(!theft4_retail_mode())e.label=@"Theft4 MetalFX FI motion+depth";
-    [e setRenderPipelineState:state.motion];[e setDepthStencilState:state.depth_always];
+    [e setRenderPipelineState:pipeline];[e setDepthStencilState:state.depth_always];
     [e setFragmentTexture:depth atIndex:0];[e setFragmentBytes:&k length:sizeof k atIndex:0];
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[e endEncoding];
   },error);
@@ -296,7 +337,12 @@ bool Present(id<MTLCommandQueue> queue,CAMetalLayer* layer,id<MTLTexture> color,
     if(interval<0.25)state.interval_s=state.interval_s*0.8+interval*0.2;
   }
   state.last_commit_ns=commit_ns;
-  const double half=std::clamp(state.interval_s*0.5,1.0/120.0,1.0/15.0);
+  // Presented-frame cap: the game runs at its 30 FPS limit, and with frame
+  // generation on the cap applies to PRESENTED frames (generated + real =
+  // 30/s), so every drawable is held at least 1/30 s. Drawable back-pressure
+  // then paces the real frames to ~15/s.
+  constexpr double kPresentedCapInterval=1.0/30.0;
+  const double half=std::max(kPresentedCapInterval,std::clamp(state.interval_s*0.5,1.0/120.0,1.0/15.0));
   const uint32_t index=state.color_index;
   id<MTLTexture> current=state.colors[index];
   id<MTLTexture> previous=state.colors[(index+2)%3];
@@ -314,6 +360,9 @@ bool Present(id<MTLCommandQueue> queue,CAMetalLayer* layer,id<MTLTexture> color,
     fi.motionVectorScaleX=float(state.width);fi.motionVectorScaleY=float(state.height);
     fi.jitterOffsetX=0;fi.jitterOffsetY=0;  // no TAA jitter in this renderer
     fi.deltaTime=float(state.interval_s);
+    // prevColorTexture must be the colorTexture of the previous encode; when
+    // the previous real frame skipped interpolation, restart history.
+    fi.shouldResetHistory=!state.encoded_last_frame;
     [fi encodeToCommandBuffer:cb];
     id<CAMetalDrawable> generated=[layer nextDrawable];
     if(generated) {
@@ -345,11 +394,11 @@ bool Present(id<MTLCommandQueue> queue,CAMetalLayer* layer,id<MTLTexture> color,
       p.gpu_end_ns=shown.presentedTime>0?uint64_t(shown.presentedTime*1e9):0;p.value=0;
       theft4_perf_record(&p);
     }];
-    if(interpolate)[real presentDrawable:drawable afterMinimumDuration:half];
-    else [real presentDrawable:drawable];
+    [real presentDrawable:drawable afterMinimumDuration:interpolate?half:kPresentedCapInterval];
   }
   [real commit];
   state.have_previous=true;state.color_index=(index+1)%3;state.motion_ready=false;
+  state.encoded_last_frame=interpolate;
   status.store(interpolate?1:-3);
   return true;
 }

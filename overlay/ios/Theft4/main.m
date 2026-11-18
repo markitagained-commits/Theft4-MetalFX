@@ -523,6 +523,7 @@ static BOOL Theft4InstallSaveExport(NSURL *selected, NSURL *support, NSURL *docu
     BOOL _publicationCaptureWriteFailed;
     BOOL _publicationCaptureStartedForNativeProfile;
     uint64_t _fpsLastFrames;
+    uint64_t _fpsLastGenerated;
     CFTimeInterval _fpsLastTime;
     UISwitch *_showCPUUsage;
     Theft4CPUUsageView *_cpuUsageView;
@@ -720,6 +721,12 @@ static BOOL configureDeviceProfile(void) {
     const BOOL isIPad = UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad;
     const uint64_t physicalMemory = NSProcessInfo.processInfo.physicalMemory;
     const char *profile = theft4_device_profile_name(isIPad, physicalMemory, isA19);
+    // 4 GB iPhones (e.g. iPhone 13 / 13 mini, reported below 5 GiB) fall
+    // under the 6 GiB band's lower bound and were classified "generic", i.e.
+    // with no memory caps at all. Give them the existing limited-memory
+    // iPhone profile (the most conservative one).
+    if (!isIPad && physicalMemory > 0 && physicalMemory < (UINT64_C(5) << 30))
+        profile = "iphone-6gb";
     setenv("THEFT4_DEVICE_PROFILE", profile, 0);
     setenv("THEFT4_DEVICE_MODEL", machine, 0);
 #ifdef THEFT4_BC_TEXTURE_COMPATIBILITY
@@ -794,6 +801,13 @@ static void bootEvent(void *context, const char *event) {
         @"Theft4ReflectionQuality": @0,
         @"Theft4AntiAliasing": @0,
     }];
+    // Below 5 GiB (4 GB iPhones): default Internal Resolution 540p instead of
+    // 720p. Registered default only; a saved user choice still wins.
+    if (UIDevice.currentDevice.userInterfaceIdiom != UIUserInterfaceIdiomPad &&
+        NSProcessInfo.processInfo.physicalMemory > 0 &&
+        NSProcessInfo.processInfo.physicalMemory < (UINT64_C(5) << 30)) {
+        [NSUserDefaults.standardUserDefaults registerDefaults:@{@"Theft4LabRenderHeight": @540}];
+    }
 #ifdef THEFT4_BC_TEXTURE_COMPATIBILITY
     [NSUserDefaults.standardUserDefaults registerDefaults:@{
         @"Theft4AstcConversion": @(Theft4DeviceNeedsBCTexturePreparation())
@@ -1058,7 +1072,8 @@ static void bootEvent(void *context, const char *event) {
     [NSLayoutConstraint activateConstraints:@[
         [_fpsLabel.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:10],
         [_fpsLabel.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-10],
-        [_fpsLabel.widthAnchor constraintEqualToConstant:92],
+        // At least the original width; grows for the frame-generation split.
+        [_fpsLabel.widthAnchor constraintGreaterThanOrEqualToConstant:92],
         [_fpsLabel.heightAnchor constraintEqualToConstant:32]
     ]];
     _cpuUsageView = [Theft4CPUUsageView new];
@@ -2468,7 +2483,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     [NSUserDefaults.standardUserDefaults setBool:_showFrameTime.on forKey:@"Theft4ShowFrameTime"];
     [self updateFrameTimeHUD];
     _touchControls.active = _gamePresentation && !_launcherDuringGame && _showControls.on;
-    _fpsLastFrames = theft4_frame_counter_published_frames();
+    _fpsLastFrames = theft4_frame_counter_published_frames(); _fpsLastGenerated = theft4_perf_generated_total();
     _fpsLastTime = CACurrentMediaTime();
 }
 
@@ -2917,7 +2932,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     }];
     [self setNeedsStatusBarAppearanceUpdate];
     [self setNeedsUpdateOfHomeIndicatorAutoHidden];
-    _fpsLastFrames = theft4_frame_counter_published_frames();
+    _fpsLastFrames = theft4_frame_counter_published_frames(); _fpsLastGenerated = theft4_perf_generated_total();
     _fpsLastTime = CACurrentMediaTime();
     _fpsLabel.text = @"--.- FPS";
     _fpsLabel.hidden = !_showFPS.on;
@@ -3007,7 +3022,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     _perfOverlayLabel.hidden = !showOverlay;
     const BOOL needsTimer = sampleFPS || _publicationCaptureActive || showOverlay;
     if (needsTimer && !_fpsTimer) {
-        _fpsLastFrames = theft4_frame_counter_published_frames();
+        _fpsLastFrames = theft4_frame_counter_published_frames(); _fpsLastGenerated = theft4_perf_generated_total();
         _fpsLastTime = CACurrentMediaTime();
         _fpsTimer = [NSTimer timerWithTimeInterval:0.5 target:self
             selector:@selector(refreshFrameRate) userInfo:nil repeats:YES];
@@ -3033,6 +3048,7 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
             if (!controller) { [timer invalidate]; return; }
             theft4_frame_time_snapshot snapshot = {0};
             theft4_frame_time_copy(&snapshot);
+            [controller->_frameTimeView noteGeneratedFrames:theft4_perf_generated_total()];
             [controller->_frameTimeView updateWithSnapshot:&snapshot];
             const int status = rex_gta4_native_profile_status();
             if (controller->_nativeProfileRequested && !controller->_nativeProfileFinished &&
@@ -3667,8 +3683,10 @@ static NSInteger Theft4StoredDensityPercent(NSString *percentKey, NSString *lega
     return 60;
 }
 static NSInteger Theft4DensityStepDown(NSInteger percent) {
-    const NSInteger steps[] = {5, 15, 35, 60, 80, 100};
-    for (NSInteger i = 5; i > 0; --i) if (percent >= steps[i]) return steps[i - 1];
+    // Same steps as the launcher's density control.
+    const NSInteger steps[] = {5, 10, 15, 20, 25, 30, 35, 60, 80, 100};
+    const NSInteger count = sizeof(steps) / sizeof(steps[0]);
+    for (NSInteger i = count - 1; i > 0; --i) if (percent >= steps[i]) return steps[i - 1];
     return 5;
 }
 
@@ -3902,8 +3920,14 @@ static NSInteger Theft4DensityStepDown(NSInteger percent) {
     const CFTimeInterval elapsed = now - _fpsLastTime;
     if (elapsed >= 0.2) {
         const double fps = (double)(frames - _fpsLastFrames) / elapsed;
-        _fpsLabel.text = [NSString stringWithFormat:@"%4.1f FPS", fps];
+        // Frame generation: show presented (real + generated) with the split.
+        const uint64_t generated = theft4_perf_generated_total();
+        const double generatedFPS = (double)(generated - _fpsLastGenerated) / elapsed;
+        _fpsLabel.text = generated != _fpsLastGenerated
+            ? [NSString stringWithFormat:@"%4.1f FPS (%.0f+%.0f FG)", fps + generatedFPS, fps, generatedFPS]
+            : [NSString stringWithFormat:@"%4.1f FPS", fps];
         _fpsLastFrames = frames;
+        _fpsLastGenerated = generated;
         _fpsLastTime = now;
     }
 }
